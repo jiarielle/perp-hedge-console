@@ -1,0 +1,20 @@
+# 密钥与本地配置(绝不提交)
+.env
+agent.env
+*.key
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 运行产物
+*.db
+*.log
+logs/
+
+# 设计稿预览(不分发)
+static/previews/
+
+# 打包产物
+*.zip

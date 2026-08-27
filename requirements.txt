@@ -1,0 +1,14 @@
+# Popdex 侧:链上下单签名 + REST 行情
+web3>=6.11.0
+eth-account>=0.11.0
+httpx>=0.27.0
+
+# Lighter 侧:官方 SDK(REST + 签名下单)
+lighter-sdk==1.0.4
+
+# 通用
+python-dotenv>=1.0.0
+websockets>=12.0
+
+# Web 控制台(web_console.py)
+aiohttp>=3.9.0
