@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设置 · Popdex ⇄ Lighter</title>
+<link rel="stylesheet" href="/static/style.css">
+<script>try{if(localStorage.getItem('hedge_theme')==='light')document.documentElement.classList.add('light')}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-in">
+    <a class="logo" href="/"><div class="mark">✳</div><div class="name">Popdex <em>⇄</em> Lighter</div></a>
+    <div class="links">
+      <a href="/">运行监控</a>
+      <a href="/setup" class="active">设置</a>
+    </div>
+    <button class="theme-btn" id="theme-btn" title="切换黑/白主题">☀️</button>
+    <div class="gap"></div>
+    <div class="status-pill"><span class="pulse" id="nav-dot"></span><span id="nav-mode">—</span> · <span id="nav-run">—</span></div>
+  </div>
+</nav>
+
+<main>
+  <div class="pagehead fx">
+    <h1>设<em>置</em></h1>
+    <span class="sub">凭据(默认实盘)· 策略参数(保存即生效并持久化)</span>
+    <span class="gap"></span>
+    <button class="mini danger" id="btn-clear">清除全部密钥</button>
+  </div>
+
+  <!-- ===== 接入向导 ===== -->
+  <div class="card glow fx d1" style="margin-bottom:14px">
+    <h2>接入设置 <span class="tag" id="wz-summary">0/2 项凭据已验证</span></h2>
+    <div class="steps">
+
+      <div class="step fx d1">
+        <div class="step-head"><div class="step-no" id="no-lighter">1</div>
+          <div class="step-title">Lighter 账户(API Key)</div>
+          <span class="badge" id="st-lighter">未配置</span></div>
+        <div class="hint">app.lighter.xyz → 设置/API → 生成 API Key。账户档位建议 Standard(免费),Premium 每笔 taker 收 2.8bps。</div>
+        <div class="fgrid">
+          <div><label>Account Index(数字)</label><input id="lt-idx" placeholder="如 123456"></div>
+          <div><label>API Key Index(数字,通常 0)</label><input id="lt-keyidx" value="0"></div>
+          <div><label>API 私钥</label><input id="lt-key" type="password" placeholder="0x…"></div>
+        </div>
+        <button class="mini primary" id="btn-lt-save">验证并保存</button>
+        <div class="feedback" id="lt-fb"></div>
+      </div>
+
+      <div class="step fx d2">
+        <div class="step-head"><div class="step-no" id="no-popdex">2</div>
+          <div class="step-title">Popdex 主账户 + Agent 授权</div>
+          <span class="badge" id="st-popdex">未配置</span></div>
+        <div class="hint">Agent 只能替你交易,不能提现;有效期默认 30 天,可随时撤销。</div>
+        <button class="mini primary" id="btn-agent-gen" style="margin-bottom:8px">① 生成新 Agent 钱包</button>
+        <div class="feedback" id="gen-fb"></div>
+        <div id="auth-box" style="display:none">
+          <div class="fgrid" style="margin-top:6px">
+            <div><label>Agent 地址(待授权)</label><input id="agent-addr" readonly></div>
+            <div><label>授权有效天数</label><input id="auth-days" value="30"></div>
+            <div><label>主钱包私钥(仅本次授权)</label><input id="main-key" type="password" placeholder="0x…"></div>
+          </div>
+          <div class="danger-note">⚠ 主钱包私钥只在内存中签一次授权交易,完成后立即丢弃,不写入任何文件或日志。请确认浏览器地址是本机 127.0.0.1。</div>
+          <button class="mini danger" id="btn-agent-auth">② 授权(广播链上交易)</button>
+          <div class="feedback" id="auth-fb"></div>
+        </div>
+        <details class="fold">
+          <summary>已有 Agent?直接填写主地址 + Agent 私钥</summary>
+          <div class="fgrid" style="margin-top:8px">
+            <div><label>Popdex 主账户地址</label><input id="pd-addr" placeholder="0x…"></div>
+            <div><label>Agent 私钥</label><input id="pd-agentkey" type="password" placeholder="0x…"></div>
+          </div>
+          <button class="mini" id="btn-pd-save">验证并保存</button>
+          <div class="feedback" id="pd-fb"></div>
+        </details>
+        <details class="fold">
+          <summary>实盘前必点:发送测试交易(空操作)</summary>
+          <div class="hint" style="margin-top:8px">发一笔官方 noop 空交易验证 Agent 签名/nonce/RPC 全链路,无任何业务效果。</div>
+          <button class="mini ghost" id="btn-agent-test" style="margin-top:4px">发送测试交易</button>
+          <div class="feedback" id="test-fb"></div>
+        </details>
+      </div>
+
+      <div class="step fx d3">
+        <div class="step-head"><div class="step-no done">✓</div>
+          <div class="step-title">完成</div></div>
+        <div class="hint">默认实盘模式。策略模式(刷量/对冲/套利)、交易对、策略参数都在「运行监控」页调整。</div>
+        <button class="mini ghost" id="btn-reverify">重新验证凭据</button>
+        <div class="feedback" id="mode-fb"></div>
+      </div>
+    </div>
+    <div class="okstrip" id="setup-done-hint" style="display:none">✓ 全部就绪:到「运行监控」页点「▶ 启动」即可(默认实盘)。</div>
+  </div>
+
+  <!-- ===== 策略参数 ===== -->
+  <div class="card fx d3">
+    <h2>策略参数 <span class="tag">核心联动:熔断线 ≥ 每轮数量 × 3</span>
+      <span style="flex:1"></span>
+      <span style="display:inline-flex;gap:6px;align-items:center">
+        <select id="preset-select"></select>
+        <button class="mini ghost" id="btn-pretosave">💾 存为自定义</button>
+      </span>
+    </h2>
+    <div id="slot-row" style="display:none;margin:-6px 0 10px">
+      <span style="font-size:12px;color:var(--dim);margin-right:8px">把当前表单参数存入槽位:</span>
+      <button class="mini" data-slot="c1">槽位 1</button>
+      <button class="mini" data-slot="c2">槽位 2</button>
+      <button class="mini" data-slot="c3">槽位 3</button>
+      <button class="mini ghost" id="btn-slot-cancel">取消</button>
+    </div>
+    <div class="config-grid" id="cfg-grid"></div>
+    <div class="warnstrip" id="cfg-warns"></div>
+    <div class="okstrip" id="cfg-ok">✓ 参数联动检查通过,无风险提示</div>
+    <div class="errline" id="cfg-err"></div>
+    <button class="mini primary" id="btn-save">保存参数</button>
+  </div>
+
+  <div class="foot">仅本机访问(127.0.0.1)· 密钥保存在本地 .env(600 权限)· 主钱包私钥仅授权时瞬时使用</div>
+</main>
+<div id="toast"></div>
+<script src="/static/common.js"></script>
+<script>
+window.onerror = (msg, src, line, col) => { CUI.toast('脚本错误: ' + msg + ' @' + line, false); };
+const $ = id => document.getElementById(id);
+
+const CFG_LABELS = {
+  order_notional_usdt: '目标金额 USDT/轮 (>0优先)',
+  order_qty: '每轮数量 (base币,金额为0时用)',
+  max_net_position: '净敞口熔断线',
+  min_edge_bps: '价差门槛 bps (触发线)',
+  volume_round_interval: '刷量轮间隔 秒 (≥3防限流)',
+  maker_fee_bps: 'Popdex maker费率 bps (VIP3=0)',
+  hedge_max_slippage_bps: '对冲滑点保护 (bps)',
+  maker_offset: '挂单偏移 (quote币)',
+  requote_threshold: '重挂阈值 (quote币)',
+  fill_timeout_sec: '挂单超时 (秒)',
+  poll_interval_sec: '轮询间隔 (秒)',
+  position_check_sec: '持仓核对间隔 (秒)',
+  max_consecutive_errors: '连续错误熔断次数',
+};
+const CFG_GROUPS = [
+  { title: '通用(三种模式共用)', keys: ['order_notional_usdt', 'order_qty', 'max_net_position',
+      'poll_interval_sec', 'position_check_sec', 'max_consecutive_errors'] },
+  { title: '🔄 刷量模式', keys: ['volume_round_interval'] },
+  { title: '💎 套利模式', keys: ['min_edge_bps', 'maker_fee_bps'] },
+  { title: '🔀 对冲 / 💎 套利 · 对冲腿(Lighter)', keys: ['hedge_max_slippage_bps'] },
+  { title: '挂单行为(三种模式共用)', keys: ['maker_offset', 'requote_threshold', 'fill_timeout_sec'] },
+];
+const CFG_NAME = {
+  order_notional_usdt: '目标金额', max_net_position: '熔断线', maker_offset: '挂单偏移',
+  requote_threshold: '重挂阈值', fill_timeout_sec: '挂单超时', hedge_max_slippage_bps: '滑点保护',
+  order_qty: '每轮数量', poll_interval_sec: '轮询间隔', position_check_sec: '持仓核对间隔',
+  max_consecutive_errors: '连续错误熔断', min_edge_bps: '价差门槛', maker_fee_bps: 'maker费率',
+  volume_round_interval: '刷量轮间隔',
+};
+const PRESETS = {
+  safe: {order_notional_usdt: '24',  max_net_position: '0.002', maker_offset: '1', requote_threshold: '5', fill_timeout_sec: '120', hedge_max_slippage_bps: '30'},
+  std:  {order_notional_usdt: '120', max_net_position: '0.006', maker_offset: '1', requote_threshold: '5', fill_timeout_sec: '120', hedge_max_slippage_bps: '30'},
+  agg:  {order_notional_usdt: '300', max_net_position: '0.012', maker_offset: '1', requote_threshold: '5', fill_timeout_sec: '30',  hedge_max_slippage_bps: '40'},
+};
+/* 自定义档位:存 localStorage,三个槽位 */
+const CUSTOM_KEY = 'hedge_custom_presets';
+function loadCustomPresets() {
+  try { return JSON.parse(localStorage.getItem(CUSTOM_KEY)) || {}; } catch (e) { return {}; }
+}
+function refreshPresetOptions() {
+  const custom = loadCustomPresets();
+  const sel = $('preset-select');
+  let html = '<option value="">📋 档位选择…</option>' +
+    '<option value="safe">🟢 保守 $24/轮</option>' +
+    '<option value="std">🟡 标准 $120/轮</option>' +
+    '<option value="agg">🔴 积极 $300/轮</option>' +
+    '<option disabled>──── 自定义 ────</option>';
+  for (const slot of ['c1', 'c2', 'c3']) {
+    const v = custom[slot];
+    const desc = v ? `${v.order_notional_usdt ?? '?'}U/轮 · 门槛 ${v.min_edge_bps ?? '?'}bps` : '(空)';
+    html += `<option value="${slot}">${v ? '▶' : '·'} 自定义${slot[1]} — ${desc}</option>`;
+  }
+  sel.innerHTML = html;
+  sel.value = '';
+}
+function collectFormParams() {
+  const out = {};
+  for (const k of Object.keys(CFG_LABELS)) {
+    const el = $('cfg-' + k);
+    if (el) out[k] = el.value;
+  }
+  return out;
+}
+function fillFormParams(p) {
+  for (const [k, v] of Object.entries(p)) { const el = $('cfg-' + k); if (el) el.value = v; }
+  updateDerived();
+}
+let cfgSnapshot = null, s_setup = null, s_config = null, lastMid = 0;
+
+function fb(id, ok, msg) { const el = $(id); el.textContent = msg || ''; el.className = 'feedback ' + (ok ? 'good' : 'bad'); }
+
+function buildConfigInputs(cfg) {
+  cfgSnapshot = cfg;
+  const grid = $('cfg-grid'); grid.innerHTML = '';
+  for (const group of CFG_GROUPS) {
+    const sec = document.createElement('div'); sec.className = 'psec';
+    sec.innerHTML = `<h3>${group.title}</h3><div class="config-grid">` +
+      group.keys.map(k =>
+        `<div class="cfg"><label>${CFG_LABELS[k]}</label>` +
+        `<input id="cfg-${k}" value="${cfg[k] ?? ''}">` +
+        `<div class="derive" id="dv-${k}"></div></div>`).join('') +
+      `</div>`;
+    grid.appendChild(sec);
+  }
+  for (const group of CFG_GROUPS)
+    for (const k of group.keys) $('cfg-' + k).oninput = updateDerived;
+  updateDerived();
+}
+function curCfgVal(k) {
+  const el = $('cfg-' + k);
+  return parseFloat(el ? el.value : (cfgSnapshot?.[k] ?? '')) || 0;
+}
+function updateDerived() {
+  const mid = lastMid;
+  const notional = curCfgVal('order_notional_usdt');
+  const qtyBase = curCfgVal('order_qty');
+  const cap = curCfgVal('max_net_position');
+  const roundQty = notional > 0 && mid ? notional / mid : qtyBase;
+  const set = (k, t) => { const el = $('dv-' + k); if (el) el.textContent = t; };
+  set('order_notional_usdt', notional > 0 && mid
+      ? `≈ ${roundQty.toFixed(6)} BTC/轮${notional < 10 ? ' ⚠低于Lighter最小$10' : ''}`
+      : (notional === 0 ? '=0 → 用下方base数量' : ''));
+  set('max_net_position', cap > 0 && roundQty > 0
+      ? `≈ $${(cap * (mid || 0)).toFixed(0)} · ${(cap / roundQty).toFixed(1)} 轮缓冲`
+        + (cap / roundQty < 2 ? ' ⚠不足2轮' : '')
+      : '');
+  set('maker_offset', `= ${curCfgVal('maker_offset')} 个价格步进`);
+  set('requote_threshold', `= ${curCfgVal('requote_threshold')} 个价格步进`);
+  if (notional > 0) set('hedge_max_slippage_bps', `≈ 最大损耗 $${(notional * curCfgVal('hedge_max_slippage_bps') / 10000).toFixed(2)}/轮`);
+  set('order_qty', notional > 0 ? '(目标金额生效中,此项未启用)'
+      : (mid ? `≈ $${(qtyBase * mid).toFixed(0)}/轮` : ''));
+}
+
+function renderSetup(setup) {
+  const f = setup.fields, ver = setup.verified;
+  const lighterCfg = f.LIGHTER_API_PRIVATE_KEY?.configured;
+  const popdexCfg = f.POPDEX_SIGNER_PRIVATE_KEY?.configured && f.POPDEX_ACCOUNT_ADDRESS?.configured;
+  const st = (el, cfgOk, verOk) => {
+    el.className = 'badge ' + (verOk ? 'ok' : cfgOk ? 'dry' : '');
+    el.textContent = verOk ? '已验证' : cfgOk ? '已保存,待验证' : '未配置';
+  };
+  st($('st-lighter'), lighterCfg, ver.lighter);
+  st($('st-popdex'), popdexCfg, ver.popdex);
+  $('no-lighter').className = 'step-no' + (ver.lighter ? ' done' : '');
+  $('no-popdex').className = 'step-no' + (ver.popdex ? ' done' : '');
+  $('lt-idx').placeholder = f.LIGHTER_ACCOUNT_INDEX?.configured ? `已存 ${f.LIGHTER_ACCOUNT_INDEX.preview}` : '如 123456';
+  $('pd-addr').placeholder = f.POPDEX_ACCOUNT_ADDRESS?.configured ? `已存 ${f.POPDEX_ACCOUNT_ADDRESS.preview}` : '0x…';
+  const doneCount = [ver.lighter, ver.popdex].filter(Boolean).length;
+  $('wz-summary').textContent = `${doneCount}/2 项凭据已验证`;
+  $('setup-done-hint').style.display = doneCount === 2 ? 'block' : 'none';
+  if (s_config && !cfgSnapshot) buildConfigInputs(s_config);
+}
+
+function render(s) {
+  const m = s.mode || 'DEMO';
+  setText2('nav-mode', m === 'LIVE' ? '实盘' : m === 'DRY_RUN' ? 'DRY_RUN' : '演示');
+  $('nav-dot').className = 'pulse ' + (s.running ? 'g' : m === 'LIVE' ? 'r' : 'y');
+  setText2('nav-run', s.running ? '运行中' : (s.stop_reason ? '已停止' : '未启动'));
+  if (s.setup) { s_setup = s.setup; renderSetup(s.setup); }
+  if (s.config) s_config = s.config;
+  if (s.config && !cfgSnapshot) buildConfigInputs(s.config);
+  const p = s.prices || {};
+  if (p.popdex_bid) lastMid = (parseFloat(p.popdex_ask) + parseFloat(p.popdex_bid)) / 2;
+}
+function setText2(id, val) { const el = $(id); if (el && el.textContent !== val) el.textContent = val; }
+
+/* 向导按钮 */
+$('btn-lt-save').onclick = async () => {
+  fb('lt-fb', false, '验证中…');
+  const r = await CUI.post('/api/setup/lighter', {
+    account_index: $('lt-idx').value.trim(), api_key_index: $('lt-keyidx').value.trim() || '0',
+    api_private_key: $('lt-key').value.trim()});
+  if (r.ok) { fb('lt-fb', true, `✓ 已验证并保存(账户权益 ${r.equity})`); $('lt-key').value = ''; tick(); }
+  else fb('lt-fb', false, '✗ ' + (r.error || '失败'));
+};
+$('btn-agent-gen').onclick = async () => {
+  fb('gen-fb', false, '生成中…');
+  const r = await CUI.post('/api/setup/agent/create');
+  if (r.ok) { $('agent-addr').value = r.agent_address; $('auth-box').style.display = 'block';
+    fb('gen-fb', true, '✓ 已生成。用主钱包私钥完成下方授权(第②步)'); }
+  else fb('gen-fb', false, '✗ ' + (r.error || '失败'));
+};
+$('btn-agent-auth').onclick = async () => {
+  if (!confirm('将用主钱包私钥签发一笔链上授权交易(approveAgent),授权该 Agent 代你交易。确认继续?')) return;
+  fb('auth-fb', false, '签名并等待上链(最多3分钟)…');
+  const r = await CUI.post('/api/setup/agent/authorize', {
+    main_private_key: $('main-key').value.trim(), days: parseInt($('auth-days').value) || 30});
+  $('main-key').value = '';
+  if (r.ok) { const until = new Date(r.expires_at).toLocaleString();
+    fb('auth-fb', true, `✓ 授权成功,有效期至 ${until}。tx: ${String(r.tx_hash).slice(0,18)}…`); tick(); }
+  else fb('auth-fb', false, '✗ ' + (r.error || '失败'));
+};
+$('btn-agent-test').onclick = async () => {
+  if (!confirm('发送一笔 noop 空交易到 Popdex 链上(无任何业务效果)以验证 Agent 下单链路?')) return;
+  fb('test-fb', false, '签名并发送中(最多2分钟)…');
+  const r = await CUI.post('/api/setup/agent/test');
+  if (r.ok) fb('test-fb', true, `✓ 链路正常!tx: ${String(r.tx_hash).slice(0,20)}…`);
+  else fb('test-fb', false, '✗ ' + (r.error || '失败'));
+};
+$('btn-pd-save').onclick = async () => {
+  fb('pd-fb', false, '验证中…');
+  const r = await CUI.post('/api/setup/popdex', {
+    account_address: $('pd-addr').value.trim(), agent_private_key: $('pd-agentkey').value.trim()});
+  if (r.ok) { fb('pd-fb', true, '✓ Agent 授权关系已验证并保存'); $('pd-agentkey').value = ''; tick(); }
+  else fb('pd-fb', false, '✗ ' + (r.error || '失败'));
+};
+$('btn-reverify').onclick = async () => {
+  fb('mode-fb', false, '验证中…');
+  const r = await CUI.post('/api/setup/verify');
+  fb('mode-fb', r.ok, r.ok ? '✓ 两项凭据均验证通过'
+    : `✗ Lighter:${r.lighter ? '通过' : '失败'} Popdex:${r.popdex ? '通过' : '失败'}`);
+  tick();
+};
+$('btn-clear').onclick = async () => {
+  if (!confirm('确认清除保存在本机的全部密钥?')) return;
+  await CUI.post('/api/setup/clear');
+  CUI.toast('已清除全部密钥'); tick();
+};
+
+/* 参数 */
+function renderWarnings(warnings) {
+  const strip = $('cfg-warns'), ok = $('cfg-ok');
+  if (!warnings || !warnings.length) { strip.style.display = 'none'; ok.style.display = 'block'; return; }
+  ok.style.display = 'none'; strip.style.display = 'block';
+  strip.innerHTML = '<div style="font-weight:700;font-size:12.5px;margin-bottom:4px">⚠ 参数联动检查发现 ' + warnings.length + ' 个问题:</div>' +
+    warnings.map(w => `
+      <div class="wline ${w.level}">
+        <span class="wmsg">${w.msg}</span>
+        <button data-key="${w.key}" data-val="${w.suggest}">采纳:${CFG_NAME[w.key] || w.key} → ${w.suggest}</button>
+      </div>`).join('');
+  strip.querySelectorAll('button').forEach(btn => {
+    btn.onclick = async () => {
+      const r = await CUI.post('/api/config', {[btn.dataset.key]: btn.dataset.val});
+      if (r.ok) { buildConfigInputs(r.config); cfgSnapshot = r.config; renderWarnings(r.warnings);
+        $('cfg-err').textContent = ''; CUI.toast('已采纳建议'); }
+    };
+  });
+}
+$('preset-select').onchange = (e) => {
+  const v = e.target.value; if (!v) return;
+  if (v.startsWith('c')) {
+    const p = loadCustomPresets()[v];
+    if (!p) { CUI.toast('该槽位为空,请先用「💾 存为自定义」保存', false); refreshPresetOptions(); return; }
+    fillFormParams(p);
+    $('cfg-err').textContent = '已填入自定义档位,点「保存参数」生效';
+  } else {
+    const p = PRESETS[v]; if (!p) return;
+    fillFormParams(p);
+    $('cfg-err').textContent = '已填入档位参数,点「保存参数」生效';
+  }
+  e.target.value = '';
+};
+$('btn-pretosave').onclick = () => {
+  const row = $('slot-row');
+  row.style.display = row.style.display === 'none' ? 'flex' : 'none';
+};
+$('btn-slot-cancel').onclick = () => { $('slot-row').style.display = 'none'; };
+$('slot-row').querySelectorAll('button[data-slot]').forEach(b => {
+  b.onclick = () => {
+    const custom = loadCustomPresets();
+    custom[b.dataset.slot] = collectFormParams();
+    localStorage.setItem(CUSTOM_KEY, JSON.stringify(custom));
+    $('slot-row').style.display = 'none';
+    refreshPresetOptions();
+    CUI.toast(`已存入自定义${b.dataset.slot[1]}(保存在本浏览器)`);
+  };
+});
+$('btn-save').onclick = async () => {
+  const body = {};
+  for (const k of Object.keys(CFG_LABELS)) {
+    const el = $('cfg-' + k); if (!el) continue;
+    el.classList.remove('err');
+    if (el.value !== String(cfgSnapshot?.[k] ?? '')) body[k] = el.value;
+  }
+  if (!Object.keys(body).length) { $('cfg-err').textContent = '没有改动'; return; }
+  const r = await CUI.post('/api/config', body);
+  if (r.ok) {
+    $('cfg-err').textContent = '';
+    buildConfigInputs(r.config); cfgSnapshot = r.config; renderWarnings(r.warnings);
+    CUI.toast('参数已保存并生效');
+  } else {
+    $('cfg-err').textContent = '无效: ' + Object.entries(r.errors || {}).map(([k, v]) => `${CFG_LABELS[k]} ${v}`).join('; ');
+    for (const k of Object.keys(r.errors || {})) $('cfg-' + k)?.classList.add('err');
+  }
+};
+
+async function tick() {
+  try { render(await CUI.get('/api/status')); } catch (e) {}
+}
+refreshPresetOptions();
+
+/* 黑白主题切换(记忆在 localStorage) */
+function applyTheme(t) {
+  document.documentElement.classList.toggle('light', t === 'light');
+  const b = document.getElementById('theme-btn');
+  if (b) b.textContent = t === 'light' ? '🌙 黑' : '☀️ 白';
+}
+applyTheme(localStorage.getItem('hedge_theme') || 'dark');
+$('theme-btn').onclick = () => {
+  const t = document.documentElement.classList.contains('light') ? 'dark' : 'light';
+  localStorage.setItem('hedge_theme', t);
+  applyTheme(t);
+};
+
+tick();
+setInterval(tick, 2500);
+</script>
+</body>
+</html>

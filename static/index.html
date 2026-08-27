@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运行监控 · Popdex ⇄ Lighter</title>
+<link rel="stylesheet" href="/static/style.css">
+<script>try{if(localStorage.getItem('hedge_theme')==='light')document.documentElement.classList.add('light')}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-in">
+    <a class="logo" href="/"><div class="mark">✳</div><div class="name">Popdex <em>⇄</em> Lighter</div></a>
+    <div class="links">
+      <a href="/" class="active">运行监控</a>
+      <a href="/setup">设置</a>
+    </div>
+    <button class="theme-btn" id="theme-btn" title="切换黑/白主题">☀️</button>
+    <div class="gap"></div>
+    <div class="status-pill"><span class="pulse" id="nav-dot"></span><span id="nav-mode">—</span> · <span id="nav-run">—</span></div>
+  </div>
+</nav>
+
+<main>
+  <!-- 英雄区 -->
+  <div class="hero fx">
+    <h1>策略<span class="grad" id="hero-state">在自动驾驶</span></h1>
+    <div class="chips">
+      <span class="chip"><span class="pulse" id="chip-dot"></span><b id="chip-mode">—</b></span>
+      <span class="chip">交易对 <b id="chip-pair">—</b></span>
+      <span class="chip">凭据 <b id="chip-cred">—</b></span>
+      <span class="chip">运行 <b id="chip-uptime">—</b></span>
+      <span class="gap" style="flex:1"></span>
+      <span class="hero-ctl">
+        <div id="symbol-dd" style="min-width:230px"></div>
+        <button class="primary" id="btn-start">▶ 启动</button>
+        <button class="stop" id="btn-stop">■ 停止</button>
+        <button class="panic" id="btn-panic">熔断</button>
+      </span>
+    </div>
+  </div>
+  <div class="warnbox" id="warnbox"></div>
+
+  <!-- 策略模式 -->
+  <div class="card fx d1" style="margin-bottom:14px">
+    <h2 style="margin-bottom:0">策略模式 <span class="tag" id="mode-desc">—</span>
+      <span style="flex:1"></span>
+      <div class="modeseg" id="mode-seg">
+        <button data-m="volume">🔄 刷量</button>
+        <button data-m="hedge">🔀 对冲</button>
+        <button data-m="arb">💎 套利</button>
+      </div>
+    </h2>
+  </div>
+
+  <!-- 磁贴 -->
+  <div class="tiles">
+    <div class="tile fx d1"><div class="lab">合计权益</div><div class="val" id="bal-total">—</div>
+      <div class="sub" id="bal-sub">Popdex — · Lighter —</div></div>
+    <div class="tile fx d2"><div class="lab">两所价差</div><div class="val" id="spread">—</div>
+      <div class="sub" id="edge-line">门槛 — · 卖 — / 买 —</div></div>
+    <div class="tile fx d3"><div class="lab">净敞口 / 熔断线</div><div class="val" id="pos-net">—</div>
+      <div class="bar"><div class="fill" id="net-bar" style="width:0%"></div></div></div>
+    <div class="tile fx d4"><div class="lab">套利轮数 / 对冲量</div><div class="val" id="st-rounds">0 / 0</div>
+      <div class="sub" id="st-sub">运行 — · 杠杆 —</div></div>
+  </div>
+
+  <!-- 盘口 -->
+  <div class="grid g3">
+    <div class="card glow fx d3">
+      <h2>价差走势 <span class="tag" id="px-age"></span></h2>
+      <canvas class="spark" id="spark" width="640" height="132"></canvas>
+      <div class="rowline"><span class="k">当前 spread</span><span class="v" id="spread-now">—</span></div>
+    </div>
+    <div class="card fx d4">
+      <h2>Popdex 盘口 <span class="badge" id="lev-badge">—</span></h2>
+      <div class="rowline"><span class="k">bid / ask</span><span class="v" id="pd-bbo">—</span></div>
+      <div class="rowline"><span class="k">点差</span><span class="v" id="pd-spread">—</span></div>
+      <div class="rowline"><span class="k">持仓</span><span class="v" id="pos-pd">—</span></div>
+      <div class="rowline"><span class="k">权益 / 可用</span><span class="v" id="bal-pd">—</span></div>
+    </div>
+    <div class="card fx d5" id="lt-card">
+      <h2>Lighter 盘口 <span class="badge" id="lt-note" style="display:none">刷量模式不使用</span></h2>
+      <div class="rowline"><span class="k">bid / ask</span><span class="v" id="lt-bbo">—</span></div>
+      <div class="rowline"><span class="k">点差</span><span class="v" id="lt-spread">—</span></div>
+      <div class="rowline"><span class="k">持仓</span><span class="v" id="pos-lt">—</span></div>
+      <div class="rowline"><span class="k">权益 / 可用</span><span class="v" id="bal-lt">—</span></div>
+    </div>
+  </div>
+
+  <!-- 挂单 + 健康 -->
+  <div class="grid g2">
+    <div class="card fx d5">
+      <h2>当前 Maker 单</h2>
+      <div class="none" id="order-none">暂无活动挂单</div>
+      <div id="order-info" style="display:none">
+        <div class="rowline"><span class="k">方向 / 数量</span><span class="v" id="ord-side">—</span></div>
+        <div class="rowline"><span class="k">挂单价格</span><span class="v" id="ord-price">—</span></div>
+        <div class="rowline"><span class="k">已挂时长</span><span class="v" id="ord-age">—</span></div>
+        <div class="rowline"><span class="k">clientOid</span><span class="v" style="font-size:10.5px" id="ord-oid">—</span></div>
+      </div>
+      <div class="rowline" style="margin-top:8px"><span class="k">等待价差窗口</span>
+        <span class="v" id="waiting-flag">—</span></div>
+    </div>
+    <div class="card fx d6">
+      <h2>运行健康</h2>
+      <div class="rowline"><span class="k">连续错误</span><span class="v" id="hp-errors">0</span></div>
+      <div class="rowline"><span class="k">停止原因</span><span class="v" id="hp-stop">—</span></div>
+      <div class="rowline" style="align-items:flex-start"><span class="k">最近错误</span><span class="v" id="hp-last" style="max-width:62%;word-break:break-all;font-size:11.5px">—</span></div>
+    </div>
+  </div>
+
+  <!-- 成交 + 日志 -->
+  <div class="grid g2">
+    <div class="card fx d6">
+      <h2>成交 / 对冲记录</h2>
+      <div class="tbl-scroll">
+      <table><thead><tr><th>时间</th><th>Popdex 持仓</th><th>Lighter 对冲</th><th>参考价</th></tr></thead>
+      <tbody id="trades"><tr><td colspan="4" style="font-family:var(--sans);color:var(--faint);text-align:center;padding:16px">暂无成交</td></tr></tbody></table>
+      </div>
+    </div>
+    <div class="card fx d6">
+      <h2>运行日志</h2>
+      <div id="logs">等待启动…</div>
+    </div>
+  </div>
+
+  <div class="foot">仅本机访问(127.0.0.1)· 策略参数在 <a href="/setup" style="color:var(--accent)">设置</a> 调整</div>
+</main>
+<div id="toast"></div>
+<script src="/static/common.js"></script>
+<script>
+window.onerror = (msg, src, line, col) => { CUI.toast('脚本错误: ' + msg + ' @' + line, false); };
+const $ = id => document.getElementById(id);
+let cfgSnapshot = null;
+let lastMid = 0;
+const spreadHist = [];
+
+/* 数值更新:仅关键大数字(bump=true)才闪,行情/时长等高频值不闪 */
+function setText(id, val, cls, bump) {
+  const el = $(id);
+  if (!el || el.textContent === val) { if (el && cls !== undefined) el.className = cls; return; }
+  el.textContent = val;
+  if (cls !== undefined) el.className = cls;
+  if (bump) { el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump'); }
+}
+
+/* ---------- 交易对(Popdex 风下拉) ---------- */
+let symDD = null;
+let sCfg = null;
+async function loadMarkets() {
+  try {
+    const r = await CUI.get('/api/markets');
+    if (!symDD) {
+      symDD = CUI.symbolDropdown($('symbol-dd'), {
+        markets: r.markets || [], current: r.current,
+        onPick: async (m) => {
+          const res = await CUI.post('/api/setup/symbol', {base: m.base});
+          if (res.ok) CUI.toast(`已切换到 ${m.base}`);
+          else CUI.toast('切换失败: ' + (res.error || ''), false);
+        },
+      });
+    } else symDD.update(r.markets || [], r.current);
+  } catch (e) { $('symbol-dd').innerHTML = '<span class="badge">加载失败</span>'; }
+}
+
+/* ---------- 策略模式 ---------- */
+const MODE_DESC = {
+  volume: 'Popdex 单所市价秒开秒平(taker双腿):连续刷量,不碰 Lighter,每轮成本≈点差+手续费',
+  hedge:  'Popdex maker + Lighter 对冲:双边同时刷量,不看价差',
+  arb:    '价差达到门槛才出手:每轮锁定正收益,平时持币等待',
+};
+function bindModeSeg() {
+  $('mode-seg').querySelectorAll('button').forEach(b => {
+    b.onclick = async () => {
+      const m = b.dataset.m;
+      if (sCfg && m === sCfg.strategy_mode) return;
+      const names = {volume: '刷量(Popdex自我成交)', hedge: '对冲(双边刷量)', arb: '套利(赚钱才出手)'};
+      if (!confirm(`切换到「${names[m]}」模式?将撤掉当前挂单。`)) return;
+      const r = await CUI.post('/api/config', {strategy_mode: m});
+      if (r.ok) { CUI.toast('已切换到 ' + names[m]); tick(); }
+      else CUI.toast('切换失败: ' + Object.values(r.errors || {})[0], false);
+    };
+  });
+}
+$('btn-start').onclick = async () => { await CUI.post('/api/start'); tick(); };
+$('btn-stop').onclick = async () => {
+  if (!confirm('确认停止?将撤掉全部挂单,并以市价平掉 Popdex 和 Lighter 两侧的持仓。')) return;
+  CUI.toast('停止中:撤单 + 双侧平仓(约10秒)…');
+  await CUI.post('/api/stop');
+  tick();
+};
+$('btn-panic').onclick = async () => {
+  if (!confirm('确认一键熔断?将停止机器人并对两侧持仓发送 reduce-only 平仓单。')) return;
+  await CUI.post('/api/panic'); CUI.toast('已熔断:两侧平仓单已发送'); tick();
+};
+
+/* 价差走势(渐变发光线) */
+function drawSpark() {
+  const cv = $('spark'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  if (spreadHist.length < 2) return;
+  const vals = spreadHist.slice(-140);
+  const max = Math.max(2, ...vals.map(v => Math.abs(v)));
+  const y0 = H / 2;
+  const px = i => i / (vals.length - 1) * W;
+  const py = v => y0 - (v / max) * (H / 2 - 8);
+  // 零轴
+  ctx.strokeStyle = 'rgba(255,255,255,.14)'; ctx.setLineDash([5, 5]);
+  ctx.beginPath(); ctx.moveTo(0, y0); ctx.lineTo(W, y0); ctx.stroke(); ctx.setLineDash([]);
+  // 面积
+  const grad = ctx.createLinearGradient(0, 0, W, 0);
+  grad.addColorStop(0, '#34d399'); grad.addColorStop(1, '#22d3ee');
+  ctx.beginPath();
+  vals.forEach((v, i) => i ? ctx.lineTo(px(i), py(v)) : ctx.moveTo(px(i), py(v)));
+  const line = ctx.strokeStyle = grad; ctx.lineWidth = 2.2;
+  ctx.shadowColor = 'rgba(52, 211, 153, .8)'; ctx.shadowBlur = 9;
+  ctx.stroke(); ctx.shadowBlur = 0;
+  ctx.lineTo(px(vals.length - 1), y0); ctx.lineTo(0, y0); ctx.closePath();
+  const area = ctx.createLinearGradient(0, 0, 0, H);
+  area.addColorStop(0, 'rgba(52,211,153,.16)'); area.addColorStop(1, 'rgba(52,211,153,0)');
+  ctx.fillStyle = area; ctx.fill();
+}
+
+function render(s) {
+  /* 导航状态 */
+  const m = s.mode || 'DEMO';
+  setText('nav-mode', m === 'LIVE' ? '实盘' : m === 'DRY_RUN' ? 'DRY_RUN' : '演示');
+  $('nav-dot').className = 'pulse ' + (s.running ? 'g' : m === 'LIVE' ? 'r' : 'y');
+  setText('nav-run', s.running ? '运行中' : (s.stop_reason ? '已停止' : '未启动'));
+
+  /* 策略模式 */
+  sCfg = s.config || sCfg;
+  const sm = (sCfg && sCfg.strategy_mode) || 'arb';
+  $('mode-seg').querySelectorAll('button').forEach(b =>
+    b.classList.toggle('active', b.dataset.m === sm));
+  setText('mode-desc', MODE_DESC[sm] || '—');
+
+  /* 英雄区 */
+  const waiting = !!s.waiting_edge;
+  let heroState;
+  if (!s.running) heroState = s.stop_reason ? `已停止 · ${s.stop_reason}` : '待命,点击启动';
+  else if (sm === 'volume') heroState = '正在单所秒开秒平刷量';
+  else if (sm === 'hedge') heroState = '双边对冲运行中';
+  else heroState = waiting ? '正在狩猎价差窗口' : '正在自动驾驶';
+  setText('hero-state', heroState);
+  $('chip-dot').className = 'pulse ' + (s.running ? 'g' : '');
+  setText('chip-mode', m === 'LIVE' ? '实盘' : m === 'DRY_RUN' ? 'DRY_RUN' : '演示模式(未配置)');
+  setText('chip-pair', `${s.popdex_symbol || '—'} / ${s.lighter_symbol || ''}`);
+  if (s.setup) setText('chip-cred', `${[s.setup.verified.lighter, s.setup.verified.popdex].filter(Boolean).length}/2 已验证`);
+  setText('chip-uptime', CUI.fmtUptime(s.started_at));
+  $('btn-start').disabled = !!s.running;
+  $('btn-stop').disabled = !s.running;
+
+  const warn = $('warnbox');
+  if (s.start_error) { warn.style.display = 'block'; warn.textContent = '启动失败:' + s.start_error; }
+  else warn.style.display = 'none';
+
+  /* 行情 */
+  const smNow = (s.config && s.config.strategy_mode) || 'arb';
+  const p = s.prices || {};
+  if (p.popdex_bid) {
+    lastMid = (parseFloat(p.popdex_ask) + parseFloat(p.popdex_bid)) / 2;
+    const v = parseFloat(p.spread_bps);
+    if (isFinite(v)) { spreadHist.push(v); if (spreadHist.length > 280) spreadHist.shift(); drawSpark(); }
+    setText('spread', p.spread_bps + ' bps', 'val ' + CUI.signedClass(p.spread_bps));
+    setText('spread-now', p.spread_bps + ' bps', 'v ' + CUI.signedClass(p.spread_bps));
+    setText('pd-bbo', `${p.popdex_bid} / ${p.popdex_ask}`);
+    setText('pd-spread', (parseFloat(p.popdex_ask) - parseFloat(p.popdex_bid)).toFixed(2));
+    if (smNow !== 'volume') {
+      setText('lt-bbo', `${p.lighter_bid} / ${p.lighter_ask}`);
+      setText('lt-spread', (parseFloat(p.lighter_ask) - parseFloat(p.lighter_bid)).toFixed(2));
+    }
+    setText('px-age', CUI.fmtAge(p.updated));
+  }
+  const e = s.edge || {};
+  if (e.sell_bps !== undefined && sm === 'arb') {
+    setText('edge-line', `门槛 ${e.threshold}bps · 卖侧 ${e.sell_bps} / 买侧 ${e.buy_bps}`);
+  } else if (sm === 'hedge') {
+    setText('edge-line', '对冲模式 · 双边刷量不看价差');
+  } else if (sm === 'volume') {
+    setText('edge-line', '刷量模式 · 单所自我成交');
+  }
+  setText('lev-badge', (s.leverage || '—') + 'x', 'badge dry');
+
+  /* 权益/持仓 */
+  const demo = m === 'DEMO';
+  const bal = s.balances || {};
+  if (bal.popdex_equity) {
+    setText('bal-total', CUI.money((parseFloat(bal.popdex_equity) || 0) + (parseFloat(bal.lighter_equity) || 0)), undefined, true);
+    setText('bal-sub', `Popdex ${CUI.money(bal.popdex_equity)} · Lighter ${CUI.money(bal.lighter_equity)}`);
+    setText('bal-pd', `${CUI.money(bal.popdex_equity)} / ${CUI.money(bal.popdex_available)}`);
+    setText('bal-lt', `${CUI.money(bal.lighter_equity)} / ${CUI.money(bal.lighter_available)}`);
+  }
+  const pos = s.positions || {};
+  if (pos.popdex !== undefined && !demo) {
+    setText('pos-pd', `${pos.popdex} ${CUI.sideWord(pos.popdex)}`, 'v ' + CUI.signedClass(pos.popdex));
+    setText('pos-lt', `${pos.lighter} ${CUI.sideWord(pos.lighter)}`, 'v ' + CUI.signedClass(pos.lighter));
+    setText('pos-net', pos.net, 'val ' + CUI.signedClass(pos.net));
+    const cap = Math.max(1e-12, parseFloat(pos.cap));
+    const ratio = Math.min(1, Math.abs(parseFloat(pos.net)) / cap);
+    $('net-bar').style.width = (ratio * 100).toFixed(1) + '%';
+  }
+
+  /* 挂单 */
+  if (s.order) {
+    $('order-none').style.display = 'none'; $('order-info').style.display = 'block';
+    setText('ord-side', (s.order.side === 'buy' ? 'BUY ' : 'SELL ') + s.order.qty,
+            'v ' + (s.order.side === 'buy' ? 'up' : 'down'));
+    setText('ord-price', s.order.price);
+    setText('ord-age', s.order.age + ' 秒');
+    setText('ord-oid', (s.order.oid || '').slice(0, 22) + '…');
+  } else {
+    $('order-none').style.display = 'block'; $('order-info').style.display = 'none';
+    $('order-none').textContent = s.waiting_edge ? '⏳ 套利模式:价差未达门槛,持币等待中'
+      : demo ? '演示模式不挂单' : '暂无活动挂单';
+    $('order-none').className = 'none' + (s.waiting_edge ? ' wait-breathe' : '');
+  }
+  setText('waiting-flag', s.waiting_edge ? '是(挂单已暂停)' : '否');
+
+  /* 刷量模式下 Lighter 卡置灰 */
+  const ltNote = $('lt-note');
+  if (ltNote) ltNote.style.display = sm === 'volume' ? 'inline-flex' : 'none';
+  document.getElementById('lt-card').classList.toggle('dimmed', sm === 'volume');
+  if (sm === 'volume') setText('lt-bbo', '刷量模式不使用 Lighter');
+
+  /* 统计/健康 */
+  const st = s.stats || {};
+  setText('st-rounds', `${st.rounds ?? 0} / ${st.hedged_qty ?? 0}`);
+  setText('st-sub', `运行 ${CUI.fmtUptime(s.started_at)} · ${sm === 'arb' ? '门槛 ' + (s.config?.min_edge_bps ?? 0) + 'bps · ' : ''}杠杆 ${s.leverage || '—'}x`);
+  setText('hp-errors', `${s.errors ?? 0} / ${s.config?.max_consecutive_errors ?? '—'}`,
+          'v ' + ((s.errors ?? 0) > 0 ? 'down' : ''));
+  setText('hp-stop', s.stop_reason || '—');
+  setText('hp-last', s.last_error || '—');
+
+  const trades = s.trades || [];
+  if (trades.length) {
+    $('trades').innerHTML = trades.map(t =>
+      `<tr><td>${t.time}</td><td class="${CUI.signedClass(t.popdex_fill)}">${t.popdex_fill}</td>
+       <td>${t.hedge}</td><td>${t.hedge_price}</td></tr>`).join('');
+  }
+
+  const logs = (s.logs || []).join('\n');
+  const el = $('logs');
+  if (el.textContent !== logs) { el.textContent = logs; el.scrollTop = el.scrollHeight; }
+}
+
+async function tick() {
+  try { render(await CUI.get('/api/status')); }
+  catch (e) { setText('nav-run', '重连中…'); }
+}
+
+
+/* 黑白主题切换(记忆在 localStorage) */
+function applyTheme(t) {
+  document.documentElement.classList.toggle('light', t === 'light');
+  const b = document.getElementById('theme-btn');
+  if (b) b.textContent = t === 'light' ? '🌙 黑' : '☀️ 白';
+}
+applyTheme(localStorage.getItem('hedge_theme') || 'dark');
+$('theme-btn').onclick = () => {
+  const t = document.documentElement.classList.contains('light') ? 'dark' : 'light';
+  localStorage.setItem('hedge_theme', t);
+  applyTheme(t);
+};
+
+loadMarkets();
+bindModeSeg();
+tick();
+setInterval(tick, 1500);
+</script>
+</body>
+</html>
