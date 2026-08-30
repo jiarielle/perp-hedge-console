@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
+import setup_store
 from dotenv import load_dotenv
 
 from lighter_client import LighterClient, LighterConfig
@@ -70,6 +71,7 @@ class BotConfig:
     maker_fee_bps: int = 1         # Popdex maker 费率(bps):VIP0=1,VIP3=0;套利门槛计算用
     strategy_mode: str = 'arb'     # arb=套利(赚钱才出手) hedge=跨所对冲刷量 volume=Popdex单所刷量
     volume_round_interval: float = 5.0   # 刷量模式:两轮之间的间隔秒(链上限速,建议≥3)
+    hedge_deadline_taker: int = 1        # 对冲模式:maker超时后升级市价吃单(保证成交,提速用;0=纯maker)
     demo: bool = False   # 未配置凭据:只看行情,不挂单不查持仓
 
     @staticmethod
@@ -89,6 +91,7 @@ class BotConfig:
             maker_fee_bps=int(os.environ.get("MAKER_FEE_BPS", "1")),
             strategy_mode=os.environ.get("STRATEGY_MODE") or "arb",
             volume_round_interval=float(os.environ.get("VOLUME_ROUND_INTERVAL", "5")),
+            hedge_deadline_taker=int(os.environ.get("HEDGE_DEADLINE_TAKER", "1")),
             poll_interval_sec=float(os.environ.get("POLL_INTERVAL_SEC", "0.6")),
             position_check_sec=float(os.environ.get("POSITION_CHECK_SEC", "2.0")),
             max_consecutive_errors=int(os.environ.get("MAX_CONSECUTIVE_ERRORS", "5")),
@@ -160,7 +163,7 @@ class HedgeBot:
 
     def apply_config(self, updates: Dict[str, Any]) -> Dict[str, str]:
         """运行时修改策略参数(只允许白名单内的数值字段)。返回错误信息 dict。"""
-        zero_ok = {"order_notional_usdt", "min_edge_bps", "maker_fee_bps"}
+        zero_ok = {"order_notional_usdt", "min_edge_bps", "maker_fee_bps", "hedge_deadline_taker"}
         errors: Dict[str, str] = {}
         for key, raw in (updates or {}).items():
             if not hasattr(self.cfg, key):
@@ -331,6 +334,20 @@ class HedgeBot:
             edge_gone = e < 0   # 挂单方向价差转负,成交反而亏 → 立即撤
         if drifted > self.cfg.requote_threshold or timed_out or edge_gone:
             reason = "价差消失" if edge_gone else ("漂移" if drifted > self.cfg.requote_threshold else "超时")
+            # 对冲模式提速:超时(而非漂移)时升级为市价吃单,本轮保底成交;
+            # maker白嫖与taker付费混合,平均成本≈ taker占比×2.4bp
+            if (timed_out and not drifted > self.cfg.requote_threshold and not edge_gone
+                    and self.cfg.strategy_mode == "hedge" and self.cfg.hedge_deadline_taker):
+                side = self._active_side
+                qty = self._active_qty
+                await self._cancel_active("超时升级taker")
+                slip = Decimal(self.cfg.hedge_max_slippage_bps) / 10000
+                log.info("对冲提速: %s 市价吃单 %s(5秒maker无人吃)", side.upper(), qty)
+                await self.popdex.place_order(
+                    symbol_id=self.cfg.popdex_symbol_id, side=side, qty=qty,
+                    order_type=ORDER_TYPE_MARKET, time_in_force=TIF_IOC,
+                    slippage_ratio=slip)
+                return   # 成交后由净敞口对齐自动在 Lighter 对冲
             await self._cancel_active(reason)
 
         self.state["order"] = {
@@ -419,6 +436,19 @@ class HedgeBot:
         side = side or self._next_maker_side
         price = (pop_bid + self.cfg.maker_offset) if side == "buy" \
             else (pop_ask - self.cfg.maker_offset)
+        # 防穿越钳制(参考 perp-dex-tools 快速模式:任何价差状态都保持在场内):
+        # 买单必须 < 对手价,卖单必须 > 对手价,否则 PostOnly 在区块执行时 revert;
+        # 点差仅1个tick无处更进取时,排同侧最优价队列(靠短超时换边提高成交率)
+        tick = self.popdex.symbol_cfg.get("tick_size", Decimal(0))
+        if tick > 0:
+            if side == "buy":
+                price = min(price, pop_ask - tick)
+                if price <= pop_bid:
+                    price = pop_bid
+            else:
+                price = max(price, pop_bid + tick)
+                if price >= pop_ask:
+                    price = pop_ask
         # 目标量:优先按USDT名义金额换算(小白友好),否则用 base 币数量
         if self.cfg.order_notional_usdt > 0:
             mid = (pop_bid + pop_ask) / 2
@@ -429,6 +459,16 @@ class HedgeBot:
         if qty <= 0:
             log.warning("计算出的下单数量为 0(名义金额太小?),跳过本轮")
             return
+        # 清场式撤单:快速模式下撤单/重挂频繁,偶发匹配失误或上链延迟会留下旧单
+        # 叠加堆积。挂新单前把本交易对全部挂单撤光,保证任意时刻最多1张在场内。
+        try:
+            strays = await self.popdex.get_pending_orders(self.cfg.popdex_symbol)
+            for o in strays:
+                await self.popdex.cancel_order(int(o["orderId"]))
+            if strays:
+                log.info("清场撤单 %d 张(防堆积)", len(strays))
+        except Exception as exc:
+            log.warning("清场撤单失败(继续挂单): %s", exc)
         self._active_oid = await self.popdex.place_order(
             symbol_id=self.cfg.popdex_symbol_id,
             side=side,
@@ -597,6 +637,7 @@ class HedgeBot:
         st["config"] = {
             "strategy_mode": self.cfg.strategy_mode,
             "volume_round_interval": self.cfg.volume_round_interval,
+            "hedge_deadline_taker": self.cfg.hedge_deadline_taker,
             "order_qty": str(self.cfg.order_qty),
             "order_notional_usdt": str(self.cfg.order_notional_usdt),
             "max_net_position": str(self.cfg.max_net_position),
@@ -751,10 +792,10 @@ async def build(dry_run_override: Optional[bool] = None) -> HedgeBot:
 
     await popdex.connect()
     await lighter.connect(bot_cfg.lighter_symbol)
-    # symbolId 自动解析(不再要求手填),同时校验配置的交易对真实存在;
-    # 加载精度规则(tickSize/lotSize),下单自动对齐,避免链上 revert
-    if not bot_cfg.popdex_symbol_id:
-        bot_cfg.popdex_symbol_id = await popdex.resolve_symbol_id(bot_cfg.popdex_symbol)
+    # symbolId 每次启动强制实时解析(陈旧ID会把A价格打到B币种合约,严重bug);
+    # 同时加载精度规则(tickSize/lotSize),下单自动对齐,避免链上 revert
+    bot_cfg.popdex_symbol_id = await popdex.resolve_symbol_id(bot_cfg.popdex_symbol)
+    setup_store.update({"POPDEX_SYMBOL_ID": str(bot_cfg.popdex_symbol_id)})
     await popdex.load_symbol_config(bot_cfg.popdex_symbol)
     ticker = await popdex.get_ticker(bot_cfg.popdex_symbol)
     log.info("Popdex %s (id=%s) 行情: last=%s bid=%s ask=%s", bot_cfg.popdex_symbol,
