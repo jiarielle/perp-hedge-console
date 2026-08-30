@@ -347,6 +347,54 @@ async def api_setup_agent_authorize(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, **result})
 
 
+async def api_setup_agent_wallet_confirm(request: web.Request) -> web.Response:
+    """钱包弹窗授权的收尾:用户提供钱包广播的 approveAgent 交易哈希,
+    后端等回执→链上验证 getAgentInfo→保存主地址(取交易发起者)+Agent私钥。
+    全程不接触任何私钥。"""
+    from popdex_client import PopdexClient, PopdexConfig
+
+    if not console.pending_agent:
+        return web.json_response({"ok": False, "error": "请先生成 Agent 钱包"}, status=400)
+    try:
+        form = await request.json()
+        tx_hash = str(form["tx_hash"]).strip()
+        if not tx_hash.startswith("0x") or len(tx_hash) != 66:
+            raise ValueError("交易哈希格式不对(应为66位0x开头)")
+        env = setup_store.read_raw()
+        client = PopdexClient(PopdexConfig(
+            api_url=env.get("POPDEX_API_URL") or "https://api.popdex.xyz",
+            chain_id=int(env.get("POPDEX_CHAIN_ID") or "2184"),
+            account_address="", signer_private_key=""))
+        await client.connect()
+        try:
+            receipt = await asyncio.to_thread(
+                client._w3.eth.wait_for_transaction_receipt, tx_hash, 180)
+            if receipt.status != 1:
+                raise RuntimeError("授权交易上链失败(reverted)")
+            signer_addr = receipt["from"]
+            info = await client.get_agent_info(console.pending_agent["address"])
+            if not info["exists"] or info["isExpired"]:
+                raise RuntimeError("链上未查到有效授权")
+            if info["delegator"].lower() != signer_addr.lower():
+                raise RuntimeError(f"授权归属 {info['delegator']},与签名钱包不符")
+        finally:
+            await client.close()
+        setup_store.update({
+            "POPDEX_ACCOUNT_ADDRESS": signer_addr,
+            "POPDEX_SIGNER_PRIVATE_KEY": console.pending_agent["private_key"],
+        })
+        agent_addr = console.pending_agent["address"]
+        console.pending_agent = None
+        console.verified["popdex"] = True
+        log.info("钱包授权完成: main=%s agent=%s tx=%s", signer_addr, agent_addr, tx_hash)
+        await _safe_rebuild()
+        return web.json_response({"ok": True, "main_address": signer_addr,
+                                  "agent": agent_addr, "tx_hash": tx_hash,
+                                  "expires_at": info["expires_at"]})
+    except Exception as exc:  # noqa: BLE001
+        return await _json_error(exc)
+
+
 async def api_setup_agent_test(_request: web.Request) -> web.Response:
     """发送一笔 noop 空交易:端到端验证 Agent 签名/时间戳nonce/RPC 链路,无业务效果。"""
     from popdex_client import PopdexClient, PopdexConfig
@@ -388,6 +436,7 @@ async def api_setup_symbol(request: web.Request) -> web.Response:
     setup_store.update({
         "POPDEX_SYMBOL": match["popdex_symbol"],
         "LIGHTER_SYMBOL": match["lighter_symbol"],
+        "POPDEX_SYMBOL_ID": str(match["popdex_symbol_id"]),
     })
     log.info("交易对已切换: %s (Popdex %s / Lighter %s)",
              base, match["popdex_symbol"], match["lighter_symbol"])
@@ -590,6 +639,7 @@ def main() -> None:
     app.router.add_post("/api/setup/agent/create", api_setup_agent_create)
     app.router.add_post("/api/setup/agent/authorize", api_setup_agent_authorize)
     app.router.add_post("/api/setup/agent/test", api_setup_agent_test)
+    app.router.add_post("/api/setup/agent/wallet_confirm", api_setup_agent_wallet_confirm)
     app.router.add_post("/api/setup/symbol", api_setup_symbol)
     app.router.add_post("/api/setup/mode", api_setup_mode)
     app.router.add_post("/api/setup/verify", api_setup_verify)

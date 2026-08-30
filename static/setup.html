@@ -64,8 +64,13 @@
             <div><label>授权有效天数</label><input id="auth-days" value="30"></div>
             <div><label>主钱包私钥(仅本次授权)</label><input id="main-key" type="password" placeholder="0x…"></div>
           </div>
-          <div class="danger-note">⚠ 主钱包私钥只在内存中签一次授权交易,完成后立即丢弃,不写入任何文件或日志。请确认浏览器地址是本机 127.0.0.1。</div>
-          <button class="mini danger" id="btn-agent-auth">② 授权(广播链上交易)</button>
+          <button class="mini primary" id="btn-agent-wallet">②A 钱包弹窗授权(推荐,零私钥)</button>
+          <div class="feedback" id="wallet-fb"></div>
+          <details class="fold" style="margin-top:6px">
+          <summary>或用主私钥授权(备用)</summary>
+          <div class="danger-note" style="margin-top:8px">⚠ 主钱包私钥只在内存中签一次授权交易,完成后立即丢弃,不写入任何文件或日志。</div>
+          <button class="mini danger" id="btn-agent-auth">②B 私钥授权(广播链上交易)</button>
+          </details>
           <div class="feedback" id="auth-fb"></div>
         </div>
         <details class="fold">
@@ -133,6 +138,7 @@ const CFG_LABELS = {
   max_net_position: '净敞口熔断线',
   min_edge_bps: '价差门槛 bps (触发线)',
   volume_round_interval: '刷量轮间隔 秒 (≥3防限流)',
+  hedge_deadline_taker: '对冲超时升级taker (1=Turbo 0=纯maker)',
   maker_fee_bps: 'Popdex maker费率 bps (VIP3=0)',
   hedge_max_slippage_bps: '对冲滑点保护 (bps)',
   maker_offset: '挂单偏移 (quote币)',
@@ -147,7 +153,7 @@ const CFG_GROUPS = [
       'poll_interval_sec', 'position_check_sec', 'max_consecutive_errors'] },
   { title: '🔄 刷量模式', keys: ['volume_round_interval'] },
   { title: '💎 套利模式', keys: ['min_edge_bps', 'maker_fee_bps'] },
-  { title: '🔀 对冲 / 💎 套利 · 对冲腿(Lighter)', keys: ['hedge_max_slippage_bps'] },
+  { title: '🔀 对冲 / 💎 套利 · 对冲腿(Lighter)', keys: ['hedge_deadline_taker', 'hedge_max_slippage_bps'] },
   { title: '挂单行为(三种模式共用)', keys: ['maker_offset', 'requote_threshold', 'fill_timeout_sec'] },
 ];
 const CFG_NAME = {
@@ -155,7 +161,7 @@ const CFG_NAME = {
   requote_threshold: '重挂阈值', fill_timeout_sec: '挂单超时', hedge_max_slippage_bps: '滑点保护',
   order_qty: '每轮数量', poll_interval_sec: '轮询间隔', position_check_sec: '持仓核对间隔',
   max_consecutive_errors: '连续错误熔断', min_edge_bps: '价差门槛', maker_fee_bps: 'maker费率',
-  volume_round_interval: '刷量轮间隔',
+  volume_round_interval: '刷量轮间隔', hedge_deadline_taker: '超时升级taker',
 };
 const PRESETS = {
   safe: {order_notional_usdt: '24',  max_net_position: '0.002', maker_offset: '1', requote_threshold: '5', fill_timeout_sec: '120', hedge_max_slippage_bps: '30'},
@@ -300,6 +306,57 @@ $('btn-agent-auth').onclick = async () => {
     fb('auth-fb', true, `✓ 授权成功,有效期至 ${until}。tx: ${String(r.tx_hash).slice(0,18)}…`); tick(); }
   else fb('auth-fb', false, '✗ ' + (r.error || '失败'));
 };
+/* 钱包弹窗授权(OKX/MetaMask,EIP-1193):私钥永不出钱包 */
+const APPROVE_SELECTOR = '0xd4c647da';   // approveAgent(address,address,bytes32,uint64,uint64,bool)
+const TACHYON = {
+  chainId: '0x888',                      // 2184
+  chainName: 'Morph Tachyon',
+  nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+  rpcUrls: ['https://api.popdex.xyz/api/v1/web3/rpc'],
+};
+const padAddr = a => a.toLowerCase().replace('0x','').padStart(64,'0');
+const padU64 = n => BigInt(n).toString(16).padStart(64,'0');
+const nameB32 = s => Array.from(new TextEncoder().encode(s))
+  .map(x => x.toString(16).padStart(2,'0')).join('').padEnd(64,'0');
+
+$('btn-agent-wallet').onclick = async () => {
+  const fb = (ok, msg) => { const el = $('wallet-fb'); el.textContent = msg||''; el.className = 'feedback ' + (ok?'good':'bad'); };
+  const agent = $('agent-addr').value.trim();
+  if (!agent) { fb(false, '请先点「① 生成新 Agent 钱包」'); return; }
+  const prov = window.okxwallet || window.ethereum;
+  if (!prov) { fb(false, '未检测到钱包:请先安装 OKX 钱包或 MetaMask 浏览器插件并解锁'); return; }
+  try {
+    fb(false, '连接钱包…(请在钱包弹窗中确认)');
+    const accounts = await prov.request({ method: 'eth_requestAccounts' });
+    const from = accounts[0];
+    try {
+      await prov.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: TACHYON.chainId }] });
+    } catch (e) {
+      if (e.code === 4902 || /unrecognized|add/i.test(String(e.message||'')))
+        await prov.request({ method: 'wallet_addEthereumChain', params: [TACHYON] });
+      else throw e;
+    }
+    const days = parseInt($('auth-days').value) || 30;
+    const now = Date.now();
+    const data = APPROVE_SELECTOR + padAddr(agent) + padAddr(from)
+               + nameB32('hedge-' + agent.slice(-6).toLowerCase())
+               + padU64(now + days*86400000) + padU64(now) + padU64(0);
+    fb(false, `钱包 ${from.slice(0,10)}… 已连接,请在本页弹出的钱包窗口中确认授权交易`);
+    const tx = await prov.request({ method: 'eth_sendTransaction', params: [{
+      from, to: '0x0000000000000000000000000000000000001008',
+      data, gas: '0x2faf080', value: '0x0' }] });
+    fb(false, `交易已广播 ${tx.slice(0,18)}… 等待上链验证(最多3分钟)`);
+    const r = await CUI.post('/api/setup/agent/wallet_confirm', { tx_hash: tx });
+    if (r.ok) {
+      fb(true, `✓ 钱包授权成功!主账户 ${r.main_address.slice(0,10)}… Agent有效期至 ` +
+        new Date(r.expires_at).toLocaleString());
+      tick();
+    } else fb(false, '✗ ' + (r.error || '失败'));
+  } catch (e) {
+    fb(false, '✗ ' + ((e && e.message) || e));
+  }
+};
+
 $('btn-agent-test').onclick = async () => {
   if (!confirm('发送一笔 noop 空交易到 Popdex 链上(无任何业务效果)以验证 Agent 下单链路?')) return;
   fb('test-fb', false, '签名并发送中(最多2分钟)…');
