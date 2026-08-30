@@ -171,40 +171,38 @@ class LighterClient:
         max_slippage_ratio: Decimal,
         reduce_only: bool = False,
     ) -> None:
-        """IOC 限价对冲单:价格=对侧一档再放宽 max_slippage_ratio,吃不满就作废。"""
+        """对冲单:官方 MARKET 类型(确定性 taker)。
+
+        首版用 LIMIT+IOC 手动定价,但 Lighter 对免费档账户有 ~300ms 下单延迟,
+        延迟期间价格变动会使限价激活时不再穿越盘口,引擎把成交记成 maker(用户在
+        Lighter 页面看到的就是这个)。改用官方 create_market_order_limited_slippage
+        (ORDER_TYPE_MARKET + 可接受价滑点保护),市价类型不可能成为 maker。
+        max_slippage_ratio 为小数比例(如 0.003 = 0.3%),SDK 按对手一档计算可接受价。
+        """
         best_bid, best_ask = bbo
-        if side == "buy":
-            price = best_ask * (1 + max_slippage_ratio)
-        else:
-            price = best_bid * (1 - max_slippage_ratio)
-
-        base_amount = int((qty * self._size_multiplier).quantize(Decimal("1")))
-        price_scaled = int((price * self._price_multiplier).quantize(Decimal("1")))
-        client_order_index = next(self._client_order_index)
-
-        log.info("Lighter 对冲: %s IOC qty=%s 限价=%s (盘口 %s/%s)",
-                 side.upper(), qty, price, best_bid, best_ask)
-
-        if self.cfg.dry_run:
-            log.info("[DRY_RUN] Lighter create_order 参数: market_index=%s coi=%s "
-                     "base_amount=%s price=%s is_ask=%s",
-                     self.market_index, client_order_index, base_amount,
-                     price_scaled, side == "sell")
-            return
-
         if self._signer is None:
             raise RuntimeError("未配置 LIGHTER_API_PRIVATE_KEY,无法下单")
 
-        tx, resp, err = await self._signer.create_order(
+        base_amount = int((qty * self._size_multiplier).quantize(Decimal("1")))
+        client_order_index = next(self._client_order_index)
+
+        log.info("Lighter 对冲: %s MARKET qty=%s 滑点上限 %.2f%% (盘口 %s/%s)",
+                 side.upper(), qty, float(max_slippage_ratio) * 100, best_bid, best_ask)
+
+        if self.cfg.dry_run:
+            log.info("[DRY_RUN] Lighter create_market_order_limited_slippage: "
+                     "market_index=%s coi=%s base_amount=%s is_ask=%s slippage=%s",
+                     self.market_index, client_order_index, base_amount,
+                     side == "sell", max_slippage_ratio)
+            return
+
+        tx, resp, err = await self._signer.create_market_order_limited_slippage(
             market_index=self.market_index,
             client_order_index=client_order_index,
             base_amount=base_amount,
-            price=price_scaled,
+            max_slippage=float(max_slippage_ratio),
             is_ask=(side == "sell"),
-            order_type=ORDER_TYPE_LIMIT,
-            time_in_force=TIF_IMMEDIATE_OR_CANCEL,
             reduce_only=reduce_only,
-            trigger_price=0,
         )
         if err is not None:
             raise RuntimeError(f"Lighter 下单失败: {err}")
