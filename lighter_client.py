@@ -170,43 +170,70 @@ class LighterClient:
         bbo: Tuple[Decimal, Decimal],
         max_slippage_ratio: Decimal,
         reduce_only: bool = False,
-    ) -> None:
-        """对冲单:官方 MARKET 类型(确定性 taker)。
+    ) -> bool:
+        """对冲单:官方 MARKET 类型(确定性 taker)+ 成交验证。
 
         首版用 LIMIT+IOC 手动定价,但 Lighter 对免费档账户有 ~300ms 下单延迟,
         延迟期间价格变动会使限价激活时不再穿越盘口,引擎把成交记成 maker(用户在
         Lighter 页面看到的就是这个)。改用官方 create_market_order_limited_slippage
         (ORDER_TYPE_MARKET + 可接受价滑点保护),市价类型不可能成为 maker。
-        max_slippage_ratio 为小数比例(如 0.003 = 0.3%),SDK 按对手一档计算可接受价。
+
+        ★ 日志实测bug修复:IOC单在行情快时会过期作废(单发出去、仓位没变),
+        机器人不知道,下个tick又发,形成"锤击循环"。现在:发单后回读仓位验证,
+        未成交则以2倍滑点立即重试,最多3次;返回是否成交。
         """
+        import asyncio as _asyncio
+
         best_bid, best_ask = bbo
         if self._signer is None:
             raise RuntimeError("未配置 LIGHTER_API_PRIVATE_KEY,无法下单")
 
         base_amount = int((qty * self._size_multiplier).quantize(Decimal("1")))
-        client_order_index = next(self._client_order_index)
 
-        log.info("Lighter 对冲: %s MARKET qty=%s 滑点上限 %.2f%% (盘口 %s/%s)",
-                 side.upper(), qty, float(max_slippage_ratio) * 100, best_bid, best_ask)
+        for attempt in (1, 2, 3):
+            slip = max_slippage_ratio * attempt     # 1x/2x/3x 逐级放宽
+            client_order_index = next(self._client_order_index)
+            self._pos_before_hedge = await self.get_position_size()   # 发单前快照
+            log.info("Lighter 对冲: %s MARKET qty=%s 滑点%.2f%%(第%d次)",
+                     side.upper(), qty, float(slip) * 100, attempt)
 
-        if self.cfg.dry_run:
-            log.info("[DRY_RUN] Lighter create_market_order_limited_slippage: "
-                     "market_index=%s coi=%s base_amount=%s is_ask=%s slippage=%s",
-                     self.market_index, client_order_index, base_amount,
-                     side == "sell", max_slippage_ratio)
-            return
+            if self.cfg.dry_run:
+                log.info("[DRY_RUN] hedge: coi=%s base=%s", client_order_index, base_amount)
+                return True
 
-        tx, resp, err = await self._signer.create_market_order_limited_slippage(
-            market_index=self.market_index,
-            client_order_index=client_order_index,
-            base_amount=base_amount,
-            max_slippage=float(max_slippage_ratio),
-            is_ask=(side == "sell"),
-            reduce_only=reduce_only,
-        )
-        if err is not None:
-            raise RuntimeError(f"Lighter 下单失败: {err}")
-        log.info("Lighter 对冲单已提交: tx=%s", getattr(tx, "tx_hash", None) or resp)
+            tx, resp, err = await self._signer.create_market_order_limited_slippage(
+                market_index=self.market_index,
+                client_order_index=client_order_index,
+                base_amount=base_amount,
+                max_slippage=float(slip),
+                is_ask=(side == "sell"),
+                reduce_only=reduce_only,
+            )
+            if err is not None:
+                raise RuntimeError(f"Lighter 下单失败: {err}")
+
+            await _asyncio.sleep(1.5)   # 等成交回报/仓位刷新
+            filled = await self._verify_fill(side, qty)
+            if filled:
+                log.info("Lighter 对冲成交确认 ✓ (第%d次)", attempt)
+                return True
+            log.warning("Lighter 对冲未成交(第%d次,IOC过期),放宽滑点重试", attempt)
+
+        log.error("Lighter 对冲3次均未成交,放弃本轮(净敞口将由下轮核对处理)")
+        return False
+
+    async def _verify_fill(self, side: str, intended_qty: Decimal) -> bool:
+        """对冲后回读仓位,验证是否真的朝预期方向变动(修锤击循环的关键)。"""
+        try:
+            after = await self.get_position_size()
+            delta = after - self._pos_before_hedge if self._pos_before_hedge is not None else Decimal(0)
+            moved = delta if side == "buy" else -delta     # 统一成"正=朝对冲方向"
+            if moved >= intended_qty * Decimal("0.5"):
+                return True
+            log.warning("仓位核对: 期望%s %s,实际变动 %s", side, intended_qty, delta)
+            return False
+        except Exception:
+            return False
 
     async def reduce_only_close(self, position: Decimal, max_slippage_ratio: Decimal) -> None:
         """用 reduce-only IOC 单平掉指定净持仓(正=多→卖出,负=空→买入)。"""
