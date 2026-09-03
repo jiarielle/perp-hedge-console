@@ -238,7 +238,8 @@ class HedgeBot:
             except Exception as exc:  # noqa: BLE001 主循环兜底,任何异常计数并可能熔断
                 msg = str(exc)
                 is_net = ("Cannot connect" in msg or "SSLError" in msg
-                          or "ClientConnectorError" in msg or "Max retries" in msg)
+                          or "ClientConnectorError" in msg or "Max retries" in msg
+                          or "(405)" in msg or "(403)" in msg or "CAPTCHA" in msg)
                 if is_net:
                     # ★ 网络瞬断软处理:代理抖动很常见,不值得立即熔断。
                     # 等20秒重试;连续2分钟(6次)都连不上才算真故障熔断。

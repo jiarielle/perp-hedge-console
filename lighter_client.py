@@ -94,6 +94,15 @@ class LighterClient:
                 raise RuntimeError(f"Lighter SignerClient 校验失败: {err}")
 
         self._api = ApiClient(configuration=Configuration(host=self.cfg.base_url))
+        # ★ Cloudflare按UA打分:SDK默认python UA在数据中心IP上必被挑战
+        # (实测腾讯东京VPS 3分钟内被CAPTCHA/405二十次)。伪装浏览器UA。
+        self.BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        try:
+            self._api.rest_client.user_agent = self.BROWSER_UA
+            self._api.default_headers["User-Agent"] = self.BROWSER_UA
+        except Exception:
+            pass
         self._lighter = lighter
         self._order_api = lighter.OrderApi(self._api)
 
@@ -144,7 +153,8 @@ class LighterClient:
     async def _guard_waf(self, exc: Exception) -> None:
         """Cloudflare CAPTCHA/HTML响应检测:遇到则等60秒并重建API会话。"""
         msg = str(exc)
-        if "CAPTCHA" in msg or "JavaScript is disabled" in msg or "502" in msg:
+        if ("CAPTCHA" in msg or "JavaScript is disabled" in msg or "502" in msg
+                or "(405)" in msg or "(403)" in msg or "Forbidden" in msg):
             log.warning("Lighter WAF挑战(CAPTCHA),冷却60秒后重试...")
             await asyncio.sleep(60)
             # 重建API客户端(丢弃被污染的会话)
@@ -153,6 +163,11 @@ class LighterClient:
                 except Exception: pass
             from lighter import ApiClient, Configuration
             self._api = ApiClient(configuration=Configuration(host=self.cfg.base_url))
+            try:
+                self._api.rest_client.user_agent = self.BROWSER_UA
+                self._api.default_headers["User-Agent"] = self.BROWSER_UA
+            except Exception:
+                pass
             self._order_api = self._lighter.OrderApi(self._api)
 
     async def get_position_size(self) -> Decimal:
