@@ -72,7 +72,7 @@ class BotConfig:
     strategy_mode: str = 'arb'     # arb=套利(赚钱才出手) hedge=跨所对冲刷量 volume=Popdex单所刷量
     volume_round_interval: float = 5.0   # 刷量模式:两轮之间的间隔秒(链上限速,建议≥3)
     hedge_deadline_taker: int = 1        # 对冲模式:maker超时后升级市价吃单(保证成交,提速用;0=纯maker)
-    hedge_edge_gate_bp: int = 2          # 对冲模式基差门控:最优侧基差<-N bp时暂停挂单(0=关)
+    hedge_edge_gate_bp: float = 2.0          # 对冲模式基差门控:最优侧基差<-N bp时暂停挂单(0=关)
     demo: bool = False   # 未配置凭据:只看行情,不挂单不查持仓
 
     @staticmethod
@@ -93,7 +93,7 @@ class BotConfig:
             strategy_mode=os.environ.get("STRATEGY_MODE") or "arb",
             volume_round_interval=float(os.environ.get("VOLUME_ROUND_INTERVAL", "5")),
             hedge_deadline_taker=int(os.environ.get("HEDGE_DEADLINE_TAKER", "1")),
-            hedge_edge_gate_bp=int(os.environ.get("HEDGE_EDGE_GATE_BP", "2")),
+            hedge_edge_gate_bp=float(os.environ.get("HEDGE_EDGE_GATE_BP", "2")),
             poll_interval_sec=float(os.environ.get("POLL_INTERVAL_SEC", "0.6")),
             position_check_sec=float(os.environ.get("POSITION_CHECK_SEC", "2.0")),
             max_consecutive_errors=int(os.environ.get("MAX_CONSECUTIVE_ERRORS", "5")),
