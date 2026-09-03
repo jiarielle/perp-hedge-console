@@ -72,6 +72,7 @@ class BotConfig:
     strategy_mode: str = 'arb'     # arb=套利(赚钱才出手) hedge=跨所对冲刷量 volume=Popdex单所刷量
     volume_round_interval: float = 5.0   # 刷量模式:两轮之间的间隔秒(链上限速,建议≥3)
     hedge_deadline_taker: int = 1        # 对冲模式:maker超时后升级市价吃单(保证成交,提速用;0=纯maker)
+    hedge_edge_gate_bp: int = 2          # 对冲模式基差门控:最优侧基差<-N bp时暂停挂单(0=关)
     demo: bool = False   # 未配置凭据:只看行情,不挂单不查持仓
 
     @staticmethod
@@ -92,11 +93,15 @@ class BotConfig:
             strategy_mode=os.environ.get("STRATEGY_MODE") or "arb",
             volume_round_interval=float(os.environ.get("VOLUME_ROUND_INTERVAL", "5")),
             hedge_deadline_taker=int(os.environ.get("HEDGE_DEADLINE_TAKER", "1")),
+            hedge_edge_gate_bp=int(os.environ.get("HEDGE_EDGE_GATE_BP", "2")),
             poll_interval_sec=float(os.environ.get("POLL_INTERVAL_SEC", "0.6")),
             position_check_sec=float(os.environ.get("POSITION_CHECK_SEC", "2.0")),
             max_consecutive_errors=int(os.environ.get("MAX_CONSECUTIVE_ERRORS", "5")),
             dry_run=os.environ.get("DRY_RUN", "true").lower() != "false",
         )
+
+
+HEDGE_COOLDOWN_SEC = 6.0   # 对冲冷却:等成交回报+仓位刷新,防锤击循环
 
 
 class RingLogHandler(logging.Handler):
@@ -128,6 +133,8 @@ class HedgeBot:
         self._active_qty = Decimal(0)
         self._placed_at = 0.0
         self._last_popdex_pos = Decimal(0)           # 上次观测的 Popdex 净持仓
+        self._last_hedge_at = 0.0                    # 上次对冲时间戳(冷却用)
+        self._net_errors = 0                         # 连续网络错误计数(软处理)
         self._vol_prev_pos = Decimal(0)              # 刷量模式:上次观测持仓
         self._last_vol_round = 0.0                   # 刷量模式:上轮开仓时间戳
         self._errors = 0
@@ -163,7 +170,7 @@ class HedgeBot:
 
     def apply_config(self, updates: Dict[str, Any]) -> Dict[str, str]:
         """运行时修改策略参数(只允许白名单内的数值字段)。返回错误信息 dict。"""
-        zero_ok = {"order_notional_usdt", "min_edge_bps", "maker_fee_bps", "hedge_deadline_taker"}
+        zero_ok = {"order_notional_usdt", "min_edge_bps", "maker_fee_bps", "hedge_deadline_taker", "maker_offset", "hedge_edge_gate_bp"}
         errors: Dict[str, str] = {}
         for key, raw in (updates or {}).items():
             if not hasattr(self.cfg, key):
@@ -229,14 +236,29 @@ class HedgeBot:
                 self._errors = 0
                 self.state["errors"] = 0
             except Exception as exc:  # noqa: BLE001 主循环兜底,任何异常计数并可能熔断
+                msg = str(exc)
+                is_net = ("Cannot connect" in msg or "SSLError" in msg
+                          or "ClientConnectorError" in msg or "Max retries" in msg)
+                if is_net:
+                    # ★ 网络瞬断软处理:代理抖动很常见,不值得立即熔断。
+                    # 等20秒重试;连续2分钟(6次)都连不上才算真故障熔断。
+                    self._net_errors += 1
+                    log.warning("网络瞬断(%d/6,等20s重试): %s", self._net_errors, msg[:80])
+                    if self._net_errors >= 6:
+                        await self._emergency(f"网络持续中断2分钟: {msg[:60]}")
+                        return
+                    await asyncio.sleep(20)
+                    continue
                 self._errors += 1
                 self.state["errors"] = self._errors
-                self.state["last_error"] = str(exc)
+                self.state["last_error"] = msg
                 log.exception("tick 异常 (%d/%d): %s", self._errors,
                               self.cfg.max_consecutive_errors, exc)
                 if self._errors >= self.cfg.max_consecutive_errors:
                     await self._emergency(f"连续错误达到上限")
                     return
+            # 本tick正常走完 → 清零网络错误计数
+            self._net_errors = 0
             await asyncio.sleep(self.cfg.poll_interval_sec)
 
         # 主循环退出:撤全部挂单 + 双侧仓位平到零(任何模式一致)
@@ -271,14 +293,21 @@ class HedgeBot:
 
         # 1) 净敞口对齐:任何来源的失衡(成交/部分成交/遗漏)都直接对冲到零。
         #    比逐笔 delta 检测健壮——不存在检测窗口漏洞。
+        #    ★ 冷却期修复:对冲有 ~1.5s 成交回报延迟,若每 0.5s tick 都允许
+        #    再对冲,会叠加多笔在途订单(实测90秒内锤了9笔)。冷却 6 秒,
+        #    期间仓位读数追上来,净敞口计算自然收敛。
         popdex_pos = await self.popdex.get_position_size(self.cfg.popdex_symbol)
         lighter_pos = await self.lighter.get_position_size()
         net = popdex_pos + lighter_pos
         mid = (pop_bid + pop_ask) / 2
+        now_mono = time.monotonic()
+        if now_mono - self._last_hedge_at < HEDGE_COOLDOWN_SEC:
+            net = Decimal(0)     # 冷却期内不再触发对冲
         if net != 0 and abs(net) * mid >= Decimal("10"):
             # Lighter BTC 最小名义 10 USDT,不足则并入下轮
             hedge_side = "sell" if net > 0 else "buy"
             log.info("检测到未对冲敞口 net=%s → Lighter %s %s", net, hedge_side, abs(net))
+            self._last_hedge_at = now_mono
             await self._hedge(hedge_side, abs(net), (lig_bid, lig_ask))
             self.trades.append({
                 "time": time.strftime("%m-%d %H:%M:%S"),
@@ -298,6 +327,20 @@ class HedgeBot:
 
         # 2) 无活动 maker 单 → 选方向挂新单
         if self._active_oid is None:
+            # ★ 基差门控(对冲模式):双边基差都太差时暂停挂单(磨损主因是逆基差成交)。
+            # 只挑基差较优的一侧挂;最优侧 < -gate 时宁可等待(等待=零成本)。
+            if self.cfg.strategy_mode == "hedge" and self.cfg.hedge_edge_gate_bp > 0:
+                e_sell = (pop_ask - lig_ask) / lig_ask * 10000   # 卖Pdex+买Lt锁定的基差
+                e_buy = (lig_bid - pop_bid) / pop_bid * 10000    # 买Pdex+卖Lt
+                best_side = "sell" if e_sell >= e_buy else "buy"
+                best_edge = max(e_sell, e_buy)
+                self.state["edge"] = {"sell_bps": f"{e_sell:.1f}", "buy_bps": f"{e_buy:.1f}",
+                                      "threshold": -self.cfg.hedge_edge_gate_bp, "updated": time.time()}
+                if best_edge < -self.cfg.hedge_edge_gate_bp:
+                    self.state["waiting_edge"] = True
+                    return
+                self.state["waiting_edge"] = False
+                self._next_maker_side = best_side   # 跟随较优基差侧
             # 双向净价差(bps,扣 Popdex maker 手续费,按当前VIP档位):
             # sell = Popdex卖maker@pop_ask + Lighter买taker@lig_ask 每轮锁定的收益
             # buy  = Popdex买maker@pop_bid + Lighter卖taker@lig_bid
@@ -433,7 +476,18 @@ class HedgeBot:
     # ---------------- 动作 ----------------
 
     async def _place_maker(self, pop_bid: Decimal, pop_ask: Decimal, side: Optional[str] = None) -> None:
-        side = side or self._next_maker_side
+        # ★ 库存感知修复:原版盲目多空交替,单边行情下仓位堆积(实测积到空8轮)。
+        # 现在:若 Popdex 库存超过 2 轮的量,强制挂反方向单(把库存吃回来)。
+        if side is None:
+            side = self._next_maker_side
+            inv = self._last_popdex_pos
+            two_rounds = self.cfg.order_qty * 2 if self.cfg.order_notional_usdt <= 0 else                 (self.cfg.order_notional_usdt / ((pop_bid + pop_ask) / 2)) * 2
+            if inv > two_rounds:
+                side = "sell"      # 多头库存过重 → 强制挂卖单减仓
+                log.info("库存感知: 多头库存 %s 超2轮,强制挂卖", inv)
+            elif inv < -two_rounds:
+                side = "buy"
+                log.info("库存感知: 空头库存 %s 超2轮,强制挂买", inv)
         price = (pop_bid + self.cfg.maker_offset) if side == "buy" \
             else (pop_ask - self.cfg.maker_offset)
         # 防穿越钳制(参考 perp-dex-tools 快速模式:任何价差状态都保持在场内):
@@ -638,6 +692,7 @@ class HedgeBot:
             "strategy_mode": self.cfg.strategy_mode,
             "volume_round_interval": self.cfg.volume_round_interval,
             "hedge_deadline_taker": self.cfg.hedge_deadline_taker,
+            "hedge_edge_gate_bp": self.cfg.hedge_edge_gate_bp,
             "order_qty": str(self.cfg.order_qty),
             "order_notional_usdt": str(self.cfg.order_notional_usdt),
             "max_net_position": str(self.cfg.max_net_position),
