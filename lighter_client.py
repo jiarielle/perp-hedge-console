@@ -76,6 +76,8 @@ class LighterClient:
         self._size_multiplier: Optional[int] = None
         self._price_multiplier: Optional[int] = None
         self._client_order_index = itertools.count(int(time.time()) % 1_000_000)
+        self._bbo_cache = None
+        self._bbo_cache_at = 0.0
 
     async def connect(self, symbol: str) -> None:
         import lighter
@@ -121,13 +123,37 @@ class LighterClient:
     # ---------------- 行情 ----------------
 
     async def get_bbo(self) -> Tuple[Decimal, Decimal]:
-        """返回 (best_bid, best_ask)。order_book_orders(limit=1) 即两档各一条。"""
+        """返回 (best_bid, best_ask)。带1.5秒缓存:数据中心IP对Lighter高频
+        轮询会触发Cloudflare CAPTCHA(实测VPS上1分钟被挑战),缓存降频防之。"""
+        import time as _t
+        now = _t.monotonic()
+        if (self._bbo_cache is not None
+                and now - self._bbo_cache_at < 1.5):
+            return self._bbo_cache
         ob = await self._order_api.order_book_orders(market_id=self.market_index, limit=1)
+        self._bbo_cache = (Decimal(str(ob.bids[0].price)), Decimal(str(ob.asks[0].price)))
+        self._bbo_cache_at = now
+        return self._bbo_cache
+        # 兼容原返回格式(ob保留供旧调用者)
         if not ob.asks or not ob.bids:
             raise RuntimeError("Lighter 盘口为空")
         return Decimal(str(ob.bids[0].price)), Decimal(str(ob.asks[0].price))
 
     # ---------------- 持仓 ----------------
+
+    async def _guard_waf(self, exc: Exception) -> None:
+        """Cloudflare CAPTCHA/HTML响应检测:遇到则等60秒并重建API会话。"""
+        msg = str(exc)
+        if "CAPTCHA" in msg or "JavaScript is disabled" in msg or "502" in msg:
+            log.warning("Lighter WAF挑战(CAPTCHA),冷却60秒后重试...")
+            await asyncio.sleep(60)
+            # 重建API客户端(丢弃被污染的会话)
+            if self._api:
+                try: await self._api.close()
+                except Exception: pass
+            from lighter import ApiClient, Configuration
+            self._api = ApiClient(configuration=Configuration(host=self.cfg.base_url))
+            self._order_api = self._lighter.OrderApi(self._api)
 
     async def get_position_size(self) -> Decimal:
         """净持仓(base 币,带方向:正=多、负=空)。

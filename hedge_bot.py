@@ -635,6 +635,7 @@ class HedgeBot:
                 await self.lighter.hedge_ioc(side, qty, fresh_bbo, slippage)
                 return
             except Exception as exc:  # noqa: PERF203
+                await self.lighter._guard_waf(exc)   # CAPTCHA→冷却重试
                 last_err = exc
                 log.warning("对冲第 %d 次失败: %s", attempt, exc)
                 await asyncio.sleep(0.5)
