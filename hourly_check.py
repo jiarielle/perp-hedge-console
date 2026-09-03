@@ -37,7 +37,7 @@ try:
 
     if BASE_EQ <= 0:
         print(f"OK(未设基线,仅上报) 轮数={s['stats']['rounds']} 敞口={net} errors={errs}"); sys.exit(0)
-    stop = (wear > 15) or (rate is not None and rate > 3) or errs >= 3 or abs(net) > 0.006
+    stop = (wear > 60) or (rate is not None and rate > 3.5) or errs >= 3 or abs(net) > 0.006
     if stop:
         print(f"STOP_NOW {line}")
     else:

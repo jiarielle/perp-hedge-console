@@ -320,40 +320,56 @@ const nameB32 = s => Array.from(new TextEncoder().encode(s))
   .map(x => x.toString(16).padStart(2,'0')).join('').padEnd(64,'0');
 
 $('btn-agent-wallet').onclick = async () => {
-  const fb = (ok, msg) => { const el = $('wallet-fb'); el.textContent = msg||''; el.className = 'feedback ' + (ok?'good':'bad'); };
+  const STEP = s => { $('wallet-fb').textContent = '⏳ ' + s; $('wallet-fb').className = 'feedback bad'; };
+  const OK   = m => { $('wallet-fb').textContent = m; $('wallet-fb').className = 'feedback good'; };
+  const ERR  = (tag, e) => { $('wallet-fb').textContent = '✗ [' + tag + '] ' +
+    ((e && (e.message || e.data?.originalError?.message)) || JSON.stringify(e) || '未知错误');
+    $('wallet-fb').className = 'feedback bad'; };
   const agent = $('agent-addr').value.trim();
-  if (!agent) { fb(false, '请先点「① 生成新 Agent 钱包」'); return; }
+  if (!agent) { ERR('前置', '请先点「① 生成新 Agent 钱包」'); return; }
   const prov = window.okxwallet || window.ethereum;
-  if (!prov) { fb(false, '未检测到钱包:请先安装 OKX 钱包或 MetaMask 浏览器插件并解锁'); return; }
+  if (!prov) { ERR('检测钱包', '页面未检测到钱包插件。注意:必须是电脑浏览器的 OKX钱包/MetaMask 扩展(手机App不行)'); return; }
+  const isOKX = !!window.okxwallet;
   try {
-    fb(false, '连接钱包…(请在钱包弹窗中确认)');
-    const accounts = await prov.request({ method: 'eth_requestAccounts' });
+    STEP(isOKX ? '检测到OKX钱包,请求连接…(看钱包弹窗)' : '检测到MetaMask,请求连接…');
+    const accounts = await (prov.request
+      ? prov.request({ method: 'eth_requestAccounts' })
+      : prov.enable());
     const from = accounts[0];
+    STEP('已连接 ' + from.slice(0,10) + '… 切换到 Morph Tachyon 网络');
     try {
       await prov.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: TACHYON.chainId }] });
-    } catch (e) {
-      if (e.code === 4902 || /unrecognized|add/i.test(String(e.message||'')))
+    } catch (sw) {
+      // 任何切换失败(含4902未添加)都尝试添加;OKX的错误码不标准,不按code判断
+      try {
         await prov.request({ method: 'wallet_addEthereumChain', params: [TACHYON] });
-      else throw e;
+        await prov.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: TACHYON.chainId }] });
+      } catch (ad) { ERR('添加网络', ad); return; }
+    }
+    // 二次确认真的切过去了(OKX有静默失败的情况)
+    const cid = await prov.request({ method: 'eth_chainId' });
+    if (String(cid).toLowerCase() !== TACHYON.chainId) {
+      ERR('网络切换', '钱包当前链 ' + cid + ',请在OKX钱包里手动切换到 Morph Tachyon(chainId 2184)后重试'); return;
     }
     const days = parseInt($('auth-days').value) || 30;
     const now = Date.now();
     const data = APPROVE_SELECTOR + padAddr(agent) + padAddr(from)
                + nameB32('hedge-' + agent.slice(-6).toLowerCase())
                + padU64(now + days*86400000) + padU64(now) + padU64(0);
-    fb(false, `钱包 ${from.slice(0,10)}… 已连接,请在本页弹出的钱包窗口中确认授权交易`);
+    STEP('网络OK。请在本页弹出的钱包窗口中「确认」授权交易(approveAgent)');
     const tx = await prov.request({ method: 'eth_sendTransaction', params: [{
       from, to: '0x0000000000000000000000000000000000001008',
-      data, gas: '0x2faf080', value: '0x0' }] });
-    fb(false, `交易已广播 ${tx.slice(0,18)}… 等待上链验证(最多3分钟)`);
+      data, value: '0x0' }] });   // gas留给钱包自行估算(RPC支持estimateGas)
+    STEP('交易已广播 ' + tx.slice(0,18) + '… 等待上链验证(最多3分钟)');
     const r = await CUI.post('/api/setup/agent/wallet_confirm', { tx_hash: tx });
     if (r.ok) {
-      fb(true, `✓ 钱包授权成功!主账户 ${r.main_address.slice(0,10)}… Agent有效期至 ` +
+      OK('✓ 钱包授权成功!主账户 ' + r.main_address.slice(0,10) + '… Agent有效期至 ' +
         new Date(r.expires_at).toLocaleString());
       tick();
-    } else fb(false, '✗ ' + (r.error || '失败'));
+    } else ERR('链上验证', r.error || '失败');
   } catch (e) {
-    fb(false, '✗ ' + ((e && e.message) || e));
+    if (e && (e.code === 4001)) ERR('你取消了', '钱包弹窗被拒绝,可重试');
+    else ERR('发送', e);
   }
 };
 
