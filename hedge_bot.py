@@ -17,6 +17,7 @@ Popdex ↔ Lighter 对冲机器人(主循环)。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -102,6 +103,9 @@ class BotConfig:
 
 
 HEDGE_COOLDOWN_SEC = 6.0   # 对冲冷却:等成交回报+仓位刷新,防锤击循环
+HEDGE_BATCH_USDT = 250     # 碎单归集阈值:净敞口攒到该名义值才对冲(省点差)
+HEDGE_BATCH_TIMEOUT_SEC = 45.0  # 小敞口兜底:挂满该秒数即使不足阈值也对冲
+STATE_FILE = os.environ.get("BOT_STATE_FILE", "")   # 状态落盘路径(hourly_check 巡检用)
 
 
 class RingLogHandler(logging.Handler):
@@ -135,6 +139,8 @@ class HedgeBot:
         self._last_popdex_pos = Decimal(0)           # 上次观测的 Popdex 净持仓
         self._last_hedge_at = 0.0                    # 上次对冲时间戳(冷却用)
         self._net_errors = 0                         # 连续网络错误计数(软处理)
+        self._last_net = Decimal(0)                  # 上次净敞口(碎单对冲归集用)
+        self._net_since = 0.0                        # 净敞口首次出现的时间(超时兜底对冲)
         self._vol_prev_pos = Decimal(0)              # 刷量模式:上次观测持仓
         self._last_vol_round = 0.0                   # 刷量模式:上轮开仓时间戳
         self._errors = 0
@@ -227,7 +233,22 @@ class HedgeBot:
                           errors=0, last_error="")
         self._errors = 0
         self._last_popdex_pos = p_pos
+        # 冲刺统计持久化:进程重启后轮数/对冲量继续累计(刷量目标跨天不回零)
+        try:
+            if STATE_FILE and os.path.exists(STATE_FILE):
+                with open(STATE_FILE, encoding="utf-8") as f:
+                    old = json.load(f)
+                old_stats = old.get("stats") or {}
+                if old.get("running"):
+                    # 上次是异常退出(状态文件还标着running),继承累计值
+                    self.state["stats"]["rounds"] = int(old_stats.get("rounds") or 0)
+                    self.state["stats"]["hedged_qty"] = str(old_stats.get("hedged_qty") or "0")
+                    log.info("继承上次会话累计: rounds=%s hedged_qty=%s",
+                             old_stats["rounds"], old_stats["hedged_qty"])
+        except Exception as exc:  # noqa: BLE001 继承失败从零起算,不影响交易
+            log.warning("累计统计继承失败(从零起算): %s", exc)
         last_pos_check = time.monotonic()
+        last_state_dump = 0.0
 
         while self._running:
             try:
@@ -260,6 +281,9 @@ class HedgeBot:
                     return
             # 本tick正常走完 → 清零网络错误计数
             self._net_errors = 0
+            if time.monotonic() - last_state_dump >= 5:
+                last_state_dump = time.monotonic()
+                self._dump_state()
             await asyncio.sleep(self.cfg.poll_interval_sec)
 
         # 主循环退出:撤全部挂单 + 双侧仓位平到零(任何模式一致)
@@ -270,6 +294,31 @@ class HedgeBot:
                 log.exception("停机收尾失败,请立即手动检查挂单与持仓!")
         self.state.update(running=False, stop_reason=self._stop_reason,
                           order=None)
+        self._dump_state()
+
+    def _dump_state(self) -> None:
+        """状态落盘(hourly_check 巡检数据源;nohup 直启时没有控制台API)。
+        原子写:先写 .tmp 再 rename,巡检不会读到半截JSON。"""
+        path = STATE_FILE
+        if not path:
+            return
+        try:
+            payload = {
+                "running": self._running,
+                "stop_reason": self._stop_reason,
+                "stats": self.state.get("stats", {}),
+                "positions": self.state.get("positions", {}),
+                "balances": self.state.get("balances", {}),
+                "prices": self.state.get("prices", {}),
+                "errors": self.state.get("errors", 0),
+                "updated": time.time(),
+            }
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception:  # noqa: BLE001 落盘失败绝不影响交易主循环
+            pass
 
     async def _tick(self) -> None:
         pop_bid, pop_ask = await self.popdex.get_bbo(self.cfg.popdex_symbol)
@@ -304,7 +353,25 @@ class HedgeBot:
         now_mono = time.monotonic()
         if now_mono - self._last_hedge_at < HEDGE_COOLDOWN_SEC:
             net = Decimal(0)     # 冷却期内不再触发对冲
-        if net != 0 and abs(net) * mid >= Decimal("10"):
+        # ★ 碎单对冲归集:maker 部分成交的 $40-200 碎片也立刻去 Lighter 吃点差,
+        # 是隐性磨损源(实测每 3-10 秒一笔)。现在攒到 HEDGE_BATCH_USDT(默认$250)
+        # 或挂满 HEDGE_BATCH_TIMEOUT_SEC(45s,防敞口过夜)才对冲一次。
+        hedge_now = False
+        if net != 0:
+            net_usd = abs(net) * mid
+            if net_usd >= Decimal(str(HEDGE_BATCH_USDT)):
+                hedge_now = True
+            elif net_usd >= Decimal("10"):
+                if self._last_net == 0:
+                    self._net_since = now_mono      # 敞口刚出现,开始计时
+                if now_mono - self._net_since >= HEDGE_BATCH_TIMEOUT_SEC:
+                    hedge_now = True                 # 小敞口超时,兜底对冲
+            else:
+                self._net_since = now_mono           # 不足最小名义,重新起算
+        else:
+            self._net_since = now_mono
+        self._last_net = net
+        if hedge_now:
             # Lighter BTC 最小名义 10 USDT,不足则并入下轮
             hedge_side = "sell" if net > 0 else "buy"
             log.info("检测到未对冲敞口 net=%s → Lighter %s %s", net, hedge_side, abs(net))
@@ -334,7 +401,17 @@ class HedgeBot:
                 e_sell = (pop_ask - lig_ask) / lig_ask * 10000   # 卖Pdex+买Lt锁定的基差
                 e_buy = (lig_bid - pop_bid) / pop_bid * 10000    # 买Pdex+卖Lt
                 best_side = "sell" if e_sell >= e_buy else "buy"
+                # ★ 换边滞回:基差两边差距不到一根头发也切边,导致买卖每3-10秒来回翻,
+                # 每翻一对白付两次点差(实测7分钟翻8次)。换边需要新侧优势 ≥1.5bp,
+                # 且保持侧仍在门控之上;否则维持原边(单边行情下同向连吃反而省磨损)。
+                if best_side != self._next_maker_side:
+                    cur_edge = e_buy if self._next_maker_side == "buy" else e_sell
+                    new_edge = e_sell if best_side == "sell" else e_buy
+                    if cur_edge >= -self.cfg.hedge_edge_gate_bp and \
+                       (new_edge - cur_edge) < Decimal("1.5"):
+                        best_side = self._next_maker_side
                 best_edge = max(e_sell, e_buy)
+                self._last_edges = {"sell": e_sell, "buy": e_buy}   # 供库存纠偏复查强制方向基差
                 self.state["edge"] = {"sell_bps": f"{e_sell:.1f}", "buy_bps": f"{e_buy:.1f}",
                                       "threshold": -self.cfg.hedge_edge_gate_bp, "updated": time.time()}
                 if best_edge < -self.cfg.hedge_edge_gate_bp:
@@ -489,6 +566,17 @@ class HedgeBot:
             elif inv < -two_rounds:
                 side = "buy"
                 log.info("库存感知: 空头库存 %s 超2轮,强制挂买", inv)
+            # ★ 基差门控复查(修复绕过):库存纠偏曾直接改写方向而不检查被强制方向的
+            # 基差,在逆基差侧硬吃(实测646次绕过,磨损停在2.7bp降不下去)。
+            # 现在:强制方向基差 < -gate 时宁可持仓等待(等待零成本),绝不以差基差减仓。
+            if side != self._next_maker_side and \
+               self.cfg.strategy_mode == "hedge" and self.cfg.hedge_edge_gate_bp > 0:
+                forced_edge = getattr(self, "_last_edges", {}).get(side)
+                if forced_edge is not None and forced_edge < -self.cfg.hedge_edge_gate_bp:
+                    self.state["waiting_edge"] = True
+                    log.info("库存纠偏暂停: %s侧基差 %.1fbp < 门控 %.1fbp,等待基差修复再减仓",
+                             side, forced_edge, -self.cfg.hedge_edge_gate_bp)
+                    return
         price = (pop_bid + self.cfg.maker_offset) if side == "buy" \
             else (pop_ask - self.cfg.maker_offset)
         # 防穿越钳制(参考 perp-dex-tools 快速模式:任何价差状态都保持在场内):
